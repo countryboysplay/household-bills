@@ -1,0 +1,42 @@
+name: Test Household Bills
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Install frontend dependencies
+        run: npm install
+      - name: Run application tests
+        shell: pwsh
+        run: ./scripts/test.ps1
+      - name: Require a new stable version for PRs into main
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        shell: pwsh
+        run: ./scripts/check-release-version.ps1
+      - name: Create current testing source ZIP
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        shell: pwsh
+        run: git archive --format=zip --output=HouseholdBills-Testing.zip HEAD
+      - name: Upload current testing ZIP
+        if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+        uses: actions/upload-artifact@v4
+        with:
+          name: HouseholdBills-Testing
+          path: HouseholdBills-Testing.zip
+          retention-days: 30

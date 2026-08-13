@@ -1,0 +1,48 @@
+name: Publish Stable Update
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+      - name: Install frontend dependencies
+        run: npm install
+      - name: Run application tests
+        shell: pwsh
+        run: ./scripts/test.ps1
+      - name: Verify this version has not already been released
+        shell: pwsh
+        run: ./scripts/check-release-version.ps1
+      - name: Build, sign updater artifact, and publish GitHub Release
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: 'Household Bills v__VERSION__'
+          releaseBody: |
+            Stable Household Bills release.
+
+            The installed app verifies the Tauri updater signature and creates a local database backup before installation.
+          releaseDraft: false
+          prerelease: false
+          args: '--bundles nsis'

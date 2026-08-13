@@ -1,0 +1,242 @@
+[[permission]]
+identifier = "allow-get-app-bootstrap"
+description = "Read application bootstrap state."
+commands.allow = ["get_app_bootstrap"]
+
+[[permission]]
+identifier = "allow-complete-onboarding"
+description = "Create the initial local household."
+commands.allow = ["complete_onboarding"]
+
+[[permission]]
+identifier = "allow-get-dashboard-summary"
+description = "Read the household dashboard summary."
+commands.allow = ["get_dashboard_summary"]
+
+[[permission]]
+identifier = "allow-create-backup"
+description = "Create a local database backup."
+commands.allow = ["create_backup"]
+
+[[permission]]
+identifier = "allow-list-bills"
+description = "List active household bills."
+commands.allow = ["list_bills"]
+
+[[permission]]
+identifier = "allow-save-bill"
+description = "Create or edit a household bill."
+commands.allow = ["save_bill"]
+
+[[permission]]
+identifier = "allow-get-bill-detail"
+description = "Read bill details and payment history."
+commands.allow = ["get_bill_detail"]
+
+[[permission]]
+identifier = "allow-mark-bill-paid"
+description = "Record a full or partial bill payment."
+commands.allow = ["mark_bill_paid"]
+
+[[permission]]
+identifier = "allow-archive-bill"
+description = "Archive an existing household bill."
+commands.allow = ["archive_bill"]
+
+[[permission]]
+identifier = "allow-list-paychecks"
+description = "List household paycheck occurrences."
+commands.allow = ["list_paychecks"]
+
+[[permission]]
+identifier = "allow-save-paycheck"
+description = "Create or update a household paycheck."
+commands.allow = ["save_paycheck"]
+
+
+[[permission]]
+identifier = "allow-delete-paycheck"
+description = "Remove an accidental household paycheck and reverse any posted deposit."
+commands.allow = ["delete_paycheck"]
+
+
+[[permission]]
+identifier = "allow-list-paycheck-schedules"
+description = "List recurring household paycheck schedules."
+commands.allow = ["list_paycheck_schedules"]
+
+[[permission]]
+identifier = "allow-save-paycheck-schedule"
+description = "Create or update a recurring household paycheck schedule."
+commands.allow = ["save_paycheck_schedule"]
+
+[[permission]]
+identifier = "allow-run-scheduler"
+description = "Recalculate the deterministic household schedule."
+commands.allow = ["run_scheduler"]
+
+[[permission]]
+identifier = "allow-get-planner"
+description = "Read the current paycheck planner."
+commands.allow = ["get_planner"]
+
+
+[[permission]]
+identifier = "allow-get-dashboard-data"
+description = "Read the Phase 4 household dashboard."
+commands.allow = ["get_dashboard_data"]
+
+[[permission]]
+identifier = "allow-get-spending-view"
+description = "Read local accounts, transactions, and spending summaries."
+commands.allow = ["get_spending_view"]
+
+[[permission]]
+identifier = "allow-add-transaction"
+description = "Record a manual household transaction."
+commands.allow = ["add_transaction"]
+
+[[permission]]
+identifier = "allow-reconcile-account"
+description = "Reconcile a manually tracked account balance."
+commands.allow = ["reconcile_account"]
+
+[[permission]]
+identifier = "allow-get-calendar-data"
+description = "Read paycheck and bill calendar events."
+commands.allow = ["get_calendar_data"]
+
+[[permission]]
+identifier = "allow-get-history-data"
+description = "Read household activity, payment, and reconciliation history."
+commands.allow = ["get_history_data"]
+
+[[permission]]
+identifier = "allow-get-payment-guidance"
+description = "Read explicit bill payment guidance from the deterministic schedule."
+commands.allow = ["get_payment_guidance"]
+
+[[set]]
+identifier = "household-default"
+description = "Default application command permissions."
+permissions = [
+  "allow-get-app-bootstrap",
+  "allow-complete-onboarding",
+  "allow-get-dashboard-summary",
+  "allow-create-backup",
+  "allow-list-bills",
+  "allow-save-bill",
+  "allow-get-bill-detail",
+  "allow-mark-bill-paid",
+  "allow-archive-bill",
+  "allow-list-paychecks",
+  "allow-save-paycheck",
+  "allow-delete-paycheck",
+  "allow-list-paycheck-schedules",
+  "allow-save-paycheck-schedule",
+  "allow-run-scheduler",
+  "allow-get-planner",
+  "allow-get-dashboard-data",
+  "allow-get-spending-view",
+  "allow-add-transaction",
+  "allow-reconcile-account",
+  "allow-get-calendar-data",
+  "allow-get-history-data",
+  "allow-get-payment-guidance",
+  "allow-get-savings-debt-view",
+  "allow-save-savings-goal",
+  "allow-save-debt",
+  "allow-record-savings-contribution",
+  "allow-record-debt-payment",
+  "allow-archive-savings-goal",
+  "allow-archive-debt",
+  "allow-get-settings-view",
+  "allow-save-settings",
+  "allow-open-app-folder",
+  "allow-list-backups",
+  "allow-request-restore-backup",
+  "allow-get-reports-data",
+  "allow-export-report-csv",
+  "allow-check-for-update",
+  "allow-install-update"
+]
+
+[[permission]]
+identifier = "allow-get-savings-debt-view"
+description = "Read savings goals and debt planning data."
+commands.allow = ["get_savings_debt_view"]
+
+[[permission]]
+identifier = "allow-save-savings-goal"
+description = "Create or edit a savings goal."
+commands.allow = ["save_savings_goal"]
+
+[[permission]]
+identifier = "allow-save-debt"
+description = "Create or edit a debt."
+commands.allow = ["save_debt"]
+
+[[permission]]
+identifier = "allow-record-savings-contribution"
+description = "Record a savings contribution."
+commands.allow = ["record_savings_contribution"]
+
+[[permission]]
+identifier = "allow-record-debt-payment"
+description = "Record an extra debt payment."
+commands.allow = ["record_debt_payment"]
+
+[[permission]]
+identifier = "allow-archive-savings-goal"
+description = "Archive a savings goal."
+commands.allow = ["archive_savings_goal"]
+
+[[permission]]
+identifier = "allow-archive-debt"
+description = "Archive a debt."
+commands.allow = ["archive_debt"]
+
+[[permission]]
+identifier = "allow-get-settings-view"
+description = "Read household settings and local storage paths."
+commands.allow = ["get_settings_view"]
+
+[[permission]]
+identifier = "allow-save-settings"
+description = "Update household settings."
+commands.allow = ["save_settings"]
+
+[[permission]]
+identifier = "allow-list-backups"
+description = "List local database backups."
+commands.allow = ["list_backups"]
+
+[[permission]]
+identifier = "allow-request-restore-backup"
+description = "Schedule a local backup to restore on next launch."
+commands.allow = ["request_restore_backup"]
+
+[[permission]]
+identifier = "allow-get-reports-data"
+description = "Read household reporting data."
+commands.allow = ["get_reports_data"]
+
+[[permission]]
+identifier = "allow-export-report-csv"
+description = "Export a household report to local CSV."
+commands.allow = ["export_report_csv"]
+
+[[permission]]
+identifier = "allow-open-app-folder"
+description = "Open one of the application's local data folders in Windows Explorer."
+commands.allow = ["open_app_folder"]
+
+[[permission]]
+identifier = "allow-check-for-update"
+description = "Check the configured stable release endpoint for a newer Household Bills version."
+commands.allow = ["check_for_update"]
+
+[[permission]]
+identifier = "allow-install-update"
+description = "Create a safety backup, download a signed Household Bills update, install it, and restart."
+commands.allow = ["install_update"]
