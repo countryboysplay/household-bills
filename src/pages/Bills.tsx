@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { archiveBill, getBillDetail, getPaymentGuidance, listBills, markBillPaid, saveBill } from "../lib/backend";
 import { dollarsToCents, formatMoney } from "../lib/money";
+import { todayText } from "../lib/dates";
 import type { BillDetail, BillListItem, PaymentGuidanceView, SaveBillPayload, UserProfile } from "../lib/types";
 
 type BillFormState = {
@@ -39,16 +40,22 @@ export function Bills({ users, onChanged }: { users: UserProfile[]; onChanged: (
   const [form,setForm]=useState<BillFormState | null>(null);
   const [payMode,setPayMode]=useState<"full"|"partial"|null>(null);
   const [paymentAmount,setPaymentAmount]=useState("");
-  const [paymentDate,setPaymentDate]=useState(new Date().toISOString().slice(0,10));
+  const [paymentDate,setPaymentDate]=useState(todayText());
   const [paidBy,setPaidBy]=useState(users[0]?.id??"");
   const [error,setError]=useState("");
   const [busy,setBusy]=useState(false);
 
+  // `preferred === null` is an explicit "select nothing in particular" (used after
+  // archiving). Only `undefined` means "keep whatever is selected" — collapsing the
+  // two would re-select the bill that was just archived and request a missing row.
   const load=async(preferred?:string|null)=>{
     const [rows,paymentGuidance]=await Promise.all([listBills(),getPaymentGuidance()]);
     setBills(rows);
     setGuidance(paymentGuidance);
-    const next=preferred ?? selectedId ?? rows[0]?.id ?? null;
+    const keepCurrent=preferred===undefined
+      ? (selectedId && rows.some(r=>r.id===selectedId) ? selectedId : null)
+      : preferred;
+    const next=keepCurrent ?? rows[0]?.id ?? null;
     setSelectedId(next);
     if(next) setDetail(await getBillDetail(next)); else setDetail(null);
   };
@@ -70,7 +77,7 @@ export function Bills({ users, onChanged }: { users: UserProfile[]; onChanged: (
   const edit=(bill:BillListItem)=>setForm({
     id:bill.id,name:bill.name,categoryId:bill.categoryId??"other",amountType:bill.amountType,amount:(bill.amountCents/100).toFixed(2),
     recurrenceType:bill.recurrenceType,dueDay:String(bill.dueDay??15),oneTimeDueDate:bill.recurrenceType==="one_time"?(bill.nextDueDate??""):"",
-    paymentType:bill.paymentType,priority:bill.priority,canSplit:bill.canSplit,assignedUserId:bill.assignedUserId??"",earliestDays:"31",notes:detail?.bill.id===bill.id?(detail.notes??""):"",
+    paymentType:bill.paymentType,priority:bill.priority,canSplit:bill.canSplit,assignedUserId:bill.assignedUserId??"",earliestDays:String(bill.payEarliestDaysBefore),notes:detail?.bill.id===bill.id?(detail.notes??""):"",
   });
 
   const submitBill=async()=>{
@@ -79,14 +86,14 @@ export function Bills({ users, onChanged }: { users: UserProfile[]; onChanged: (
     try{
       const payload:SaveBillPayload={id:form.id??null,name:form.name,categoryId:form.categoryId,amountType:form.amountType,amountCents:dollarsToCents(form.amount),
         dueDay:form.recurrenceType==="monthly"?Number(form.dueDay):null,recurrenceType:form.recurrenceType,oneTimeDueDate:form.recurrenceType==="one_time"?form.oneTimeDueDate:null,
-        paymentType:form.paymentType,priority:form.priority,canSplit:form.canSplit,assignedUserId:form.assignedUserId||null,payEarliestDaysBefore:Number(form.earliestDays)||31,notes:form.notes||null};
+        paymentType:form.paymentType,priority:form.priority,canSplit:form.canSplit,assignedUserId:form.assignedUserId||null,payEarliestDaysBefore:form.earliestDays.trim()===""||!Number.isFinite(Number(form.earliestDays))?31:Number(form.earliestDays),notes:form.notes||null};
       const id=await saveBill(payload); setForm(null); await load(id); await onChanged();
     }catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false)}
   };
 
   const openPay=(mode:"full"|"partial")=>{
     if(!detail?.bill.nextOccurrenceId)return;
-    setPayMode(mode); setPaymentAmount((detail.bill.amountCents/100).toFixed(2)); setPaymentDate(new Date().toISOString().slice(0,10)); setPaidBy(users[0]?.id??"");
+    setPayMode(mode); setPaymentAmount((detail.bill.remainingAmountCents/100).toFixed(2)); setPaymentDate(todayText()); setPaidBy(users[0]?.id??"");
   };
   const submitPayment=async()=>{
     if(!detail?.bill.nextOccurrenceId||!payMode)return;
@@ -99,7 +106,13 @@ export function Bills({ users, onChanged }: { users: UserProfile[]; onChanged: (
 
   const doArchive=async()=>{
     if(!detail||!confirm(`Archive ${detail.bill.name}? Its history will be kept.`))return;
-    await archiveBill(detail.bill.id); setSelectedId(null); await load(null); await onChanged();
+    setBusy(true);setError("");
+    try{
+      await archiveBill(detail.bill.id);
+      setSelectedId(null);
+      await load(null);
+      await onChanged();
+    }catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false)}
   };
 
   const selectedGuidance = detail?.bill.nextOccurrenceId ? guidance?.items.find(g=>g.occurrenceId===detail.bill.nextOccurrenceId) ?? null : null;

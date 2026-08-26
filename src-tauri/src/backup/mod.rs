@@ -59,10 +59,15 @@ pub fn schedule_restore(backup_dir:&Path,marker:&Path,file_name:&str)->AppResult
 
 pub fn apply_pending_restore(database_path:&Path,marker:&Path)->AppResult<bool>{
     if !marker.is_file(){return Ok(false);}
-    let source=PathBuf::from(fs::read_to_string(marker)?.trim());
-    if !source.is_file(){let _=fs::remove_file(marker);return Err(AppError::Validation("pending restore backup no longer exists".into()));}
+    let request=fs::read_to_string(marker);
+    // Consume the request before acting on it. Every failure path below must leave
+    // the marker gone: retrying a bad restore automatically on the next launch
+    // would let one unreadable backup file block startup forever.
+    let _=fs::remove_file(marker);
+    let source=PathBuf::from(request?.trim().to_string());
+    if !source.is_file(){return Err(AppError::Validation("pending restore backup no longer exists".into()));}
     validate_sqlite_backup(&source)?;
     let wal=PathBuf::from(format!("{}-wal",database_path.display())); let shm=PathBuf::from(format!("{}-shm",database_path.display()));
     let _=fs::remove_file(&wal);let _=fs::remove_file(&shm);
-    fs::copy(&source,database_path)?; let _=fs::remove_file(marker);Ok(true)
+    fs::copy(&source,database_path)?;Ok(true)
 }

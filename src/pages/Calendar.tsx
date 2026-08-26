@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { getCalendarData } from "../lib/backend";
 import type { CalendarEvent } from "../lib/types";
 import { formatMoney } from "../lib/money";
+import { dateText, todayText, parseDateText } from "../lib/dates";
 
 export function Calendar() {
   const now = new Date();
@@ -46,7 +47,5 @@ export function Calendar() {
   </div>
 }
 
-function dateText(d:Date){return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`}
-function todayText(){return dateText(new Date())}
-function prettyDate(v:string){return new Date(`${v}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric"})}
-function prettyFullDate(v:string){return new Date(`${v}T12:00:00`).toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"})}
+function prettyDate(v:string){return parseDateText(v).toLocaleDateString("en-US",{month:"short",day:"numeric"})}
+function prettyFullDate(v:string){return parseDateText(v).toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"})}

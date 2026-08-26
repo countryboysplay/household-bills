@@ -19,6 +19,9 @@ pub struct AppState {
     backup_dir: PathBuf,
     export_dir: PathBuf,
     restore_marker: PathBuf,
+    /// Set when a pending restore could not be applied at startup. The existing
+    /// database was left untouched; the UI surfaces this so the failure is not silent.
+    restore_error: Option<String>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -34,7 +37,12 @@ pub fn run() {
             fs::create_dir_all(&export_dir)?;
             let database_path = app_data_dir.join("household_bills.sqlite3");
             let restore_marker = app_data_dir.join("restore_pending.txt");
-            backup::apply_pending_restore(&database_path, &restore_marker)?;
+            // A restore that cannot be applied leaves the existing database intact.
+            // Starting up with a visible warning always beats refusing to launch.
+            let restore_error = match backup::apply_pending_restore(&database_path, &restore_marker) {
+                Ok(_) => None,
+                Err(e) => Some(e.to_string()),
+            };
             let database_existed = database_path.is_file();
             let mut conn = Connection::open(&database_path)?;
             let pending_migrations = database_existed && db::has_pending_migrations(&conn).unwrap_or(true);
@@ -60,7 +68,7 @@ pub fn run() {
             conn.execute("UPDATE app_meta SET last_app_version=?1,updated_at=CURRENT_TIMESTAMP WHERE id=1", [current_version])?;
             let retention: i64 = conn.query_row("SELECT COALESCE(backup_retention_count,14) FROM household_settings WHERE id=1", [], |r| r.get(0)).unwrap_or(14);
             if db::onboarding_complete(&conn).unwrap_or(false) { let _ = backup::create_daily_backup_if_needed(&conn, &database_path, &backup_dir, retention.max(3) as usize); }
-            app.manage(AppState { db: Mutex::new(conn), database_path, backup_dir, export_dir, restore_marker });
+            app.manage(AppState { db: Mutex::new(conn), database_path, backup_dir, export_dir, restore_marker, restore_error });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

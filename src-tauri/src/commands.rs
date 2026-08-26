@@ -18,7 +18,7 @@ pub struct SettingsDto { pub household_name: String, pub protected_buffer_cents:
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BootstrapDto { pub app_version: String, pub onboarding_complete: bool, pub users: Vec<UserProfileDto>, pub accounts: Vec<AccountDto>, pub settings: Option<SettingsDto>, pub database_path: String, pub backup_directory: String }
+pub struct BootstrapDto { pub app_version: String, pub onboarding_complete: bool, pub users: Vec<UserProfileDto>, pub accounts: Vec<AccountDto>, pub settings: Option<SettingsDto>, pub database_path: String, pub backup_directory: String, pub restore_error: Option<String> }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,7 +36,7 @@ fn bootstrap_from_state(state: &AppState) -> AppResult<BootstrapDto> {
     let mut accounts_stmt = conn.prepare("SELECT id,name,account_type,book_balance_cents,is_primary_bill_account FROM accounts WHERE is_active=1 ORDER BY is_primary_bill_account DESC, created_at")?;
     let accounts = accounts_stmt.query_map([], |r| Ok(AccountDto { id:r.get(0)?, name:r.get(1)?, account_type:r.get(2)?, book_balance_cents:r.get(3)?, is_primary_bill_account:r.get::<_,i64>(4)?==1 }))?.collect::<Result<Vec<_>,_>>()?;
     let settings = conn.query_row("SELECT household_name,protected_buffer_cents,default_planning_horizon_days,ai_enabled FROM household_settings WHERE id=1", [], |r| Ok(SettingsDto { household_name:r.get(0)?, protected_buffer_cents:r.get(1)?, default_planning_horizon_days:r.get(2)?, ai_enabled:r.get::<_,i64>(3)?==1 })).optional()?;
-    Ok(BootstrapDto { app_version: env!("CARGO_PKG_VERSION").into(), onboarding_complete, users, accounts, settings, database_path:state.database_path.display().to_string(), backup_directory:state.backup_dir.display().to_string() })
+    Ok(BootstrapDto { app_version: env!("CARGO_PKG_VERSION").into(), onboarding_complete, users, accounts, settings, database_path:state.database_path.display().to_string(), backup_directory:state.backup_dir.display().to_string(), restore_error:state.restore_error.clone() })
 }
 
 #[tauri::command]
