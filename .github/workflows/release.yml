@@ -30,6 +30,12 @@ jobs:
       - name: Verify this version has not already been released
         shell: pwsh
         run: ./scripts/check-release-version.ps1
+      # Builds the release binary and reads its PE header. Runs before the
+      # publish step so a console-subsystem binary can never reach a release.
+      # The bundle step below reuses this build.
+      - name: Verify the release binary is a GUI app, not a console app
+        shell: pwsh
+        run: ./scripts/check-windows-subsystem.ps1
       - name: Build, sign updater artifact, and publish GitHub Release
         uses: tauri-apps/tauri-action@v1
         env:
