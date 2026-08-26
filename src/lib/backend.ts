@@ -41,6 +41,7 @@ const browserBootstrap: AppBootstrap = {
   },
   databasePath: "Browser preview only",
   backupDirectory: "Browser preview only",
+  restoreError: null,
 };
 
 const browserDashboard: DashboardSummary = {
@@ -76,9 +77,9 @@ export async function createBackup(): Promise<string> {
 
 
 const previewBills: BillListItem[] = [
-  { id:"b-mortgage",name:"Mortgage",categoryId:"housing",categoryName:"Housing",amountType:"fixed",amountCents:110000,dueDay:15,recurrenceType:"monthly",paymentType:"manual",priority:"essential",canSplit:false,assignedUserId:null,assignedUserName:null,nextOccurrenceId:"o-mortgage",nextDueDate:"2026-08-15",nextPayByDate:"2026-08-14",nextStatus:"scheduled",assignedPaycheckDate:"2026-08-14",assignedPaycheckOwner:"Jonathan" },
-  { id:"b-electric",name:"Electric",categoryId:"utilities",categoryName:"Utilities",amountType:"variable",amountCents:18422,dueDay:18,recurrenceType:"monthly",paymentType:"manual",priority:"essential",canSplit:true,assignedUserId:null,assignedUserName:null,nextOccurrenceId:"o-electric",nextDueDate:"2026-08-18",nextPayByDate:"2026-08-18",nextStatus:"scheduled",assignedPaycheckDate:"2026-08-14",assignedPaycheckOwner:"Jonathan" },
-  { id:"b-internet",name:"Internet",categoryId:"utilities",categoryName:"Utilities",amountType:"fixed",amountCents:9000,dueDay:22,recurrenceType:"monthly",paymentType:"manual",priority:"normal",canSplit:false,assignedUserId:null,assignedUserName:null,nextOccurrenceId:"o-internet",nextDueDate:"2026-08-22",nextPayByDate:"2026-08-21",nextStatus:"scheduled",assignedPaycheckDate:"2026-08-14",assignedPaycheckOwner:"Jonathan" },
+  { id:"b-mortgage",name:"Mortgage",categoryId:"housing",categoryName:"Housing",amountType:"fixed",amountCents:110000,dueDay:15,recurrenceType:"monthly",paymentType:"manual",priority:"essential",canSplit:false,assignedUserId:null,assignedUserName:null,nextOccurrenceId:"o-mortgage",nextDueDate:"2026-08-15",nextPayByDate:"2026-08-14",nextStatus:"scheduled",assignedPaycheckDate:"2026-08-14",assignedPaycheckOwner:"Jonathan",payEarliestDaysBefore:31,remainingAmountCents:110000 },
+  { id:"b-electric",name:"Electric",categoryId:"utilities",categoryName:"Utilities",amountType:"variable",amountCents:18422,dueDay:18,recurrenceType:"monthly",paymentType:"manual",priority:"essential",canSplit:true,assignedUserId:null,assignedUserName:null,nextOccurrenceId:"o-electric",nextDueDate:"2026-08-18",nextPayByDate:"2026-08-18",nextStatus:"scheduled",assignedPaycheckDate:"2026-08-14",assignedPaycheckOwner:"Jonathan",payEarliestDaysBefore:31,remainingAmountCents:18422 },
+  { id:"b-internet",name:"Internet",categoryId:"utilities",categoryName:"Utilities",amountType:"fixed",amountCents:9000,dueDay:22,recurrenceType:"monthly",paymentType:"manual",priority:"normal",canSplit:false,assignedUserId:null,assignedUserName:null,nextOccurrenceId:"o-internet",nextDueDate:"2026-08-22",nextPayByDate:"2026-08-21",nextStatus:"scheduled",assignedPaycheckDate:"2026-08-14",assignedPaycheckOwner:"Jonathan",payEarliestDaysBefore:31,remainingAmountCents:9000 },
 ];
 
 const previewPlanner: PlannerView = {

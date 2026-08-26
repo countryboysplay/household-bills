@@ -10,6 +10,7 @@ import {
   savePaycheckSchedule,
 } from "../lib/backend";
 import { dollarsToCents, formatMoney } from "../lib/money";
+import { todayText } from "../lib/dates";
 import type {
   PaycheckItem,
   PaycheckScheduleItem,
@@ -51,13 +52,13 @@ type ScheduleForm = {
 const emptyScheduleForm = (userId: string): ScheduleForm => ({
   userId,
   frequency: "one_time",
-  payDate: new Date().toISOString().slice(0, 10),
+  payDate: todayText(),
   projected: "",
   expected: "",
   actual: "",
   status: "projected",
   note: "",
-  anchorDate: new Date().toISOString().slice(0, 10),
+  anchorDate: todayText(),
   firstDay: "1",
   secondDay: "15",
   dayOfMonth: "1",
@@ -68,13 +69,13 @@ const scheduleToForm = (schedule: PaycheckScheduleItem): ScheduleForm => ({
   id: schedule.id,
   userId: schedule.userId,
   frequency: schedule.frequency,
-  payDate: schedule.nextPayDate ?? new Date().toISOString().slice(0, 10),
+  payDate: schedule.nextPayDate ?? todayText(),
   projected: (schedule.defaultProjectedAmountCents / 100).toFixed(2),
   expected: "",
   actual: "",
   status: "projected",
   note: "",
-  anchorDate: schedule.anchorDate ?? schedule.nextPayDate ?? new Date().toISOString().slice(0, 10),
+  anchorDate: schedule.anchorDate ?? schedule.nextPayDate ?? todayText(),
   firstDay: String(schedule.firstDay ?? 1),
   secondDay: String(schedule.secondDay ?? 15),
   dayOfMonth: String(schedule.dayOfMonth ?? 1),
@@ -358,7 +359,7 @@ const fundingSummary=(g:PaymentGuidanceView["items"][number])=>g.fundingSources.
 const formatDate = (s: string) => new Date(`${s}T12:00:00`).toLocaleDateString("en-US", { month: "short", day: "numeric", year: new Date(s).getFullYear() === new Date().getFullYear() ? undefined : "numeric" });
 const healthLabel = (h: string) => h === "shortage" ? "Shortage" : h === "tight" ? "Tight" : "Healthy";
 const frequencyLabel = (frequency: PaycheckScheduleItem["frequency"]) => frequency === "weekly" ? "Weekly" : frequency === "biweekly" ? "Every 2 Weeks" : frequency === "semimonthly" ? "Twice a Month" : "Monthly";
-const friendlyWarning = (c: string) => c.includes("Negative") ? "Negative Balance" : c.includes("BelowBuffer") ? "Below Protected Buffer" : c.includes("Shortage") ? "Funding Shortage" : "Schedule Notice";
+const friendlyWarning = (c: string) => c.includes("Negative") ? "Negative Balance" : c.includes("BelowBuffer") ? "Below Protected Buffer" : c.includes("Shortage") ? "Funding Shortage" : c.includes("PastDue") ? "Past Due" : "Schedule Notice";
 const friendlyWarningMessage = (w: PlannerView["warnings"][number], protectedBufferCents: number) => {
   const when = w.date ? formatDate(w.date) : "the current plan";
   if (w.code.includes("ProjectedNegative")) {

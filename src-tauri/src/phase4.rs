@@ -211,7 +211,8 @@ pub fn get_dashboard_data(state: State<'_, AppState>) -> AppResult<DashboardData
     )?;
     let month_everyday: i64 = conn.query_row(
         "SELECT COALESCE(-SUM(amount_cents),0) FROM transactions
-         WHERE transaction_date>=?1 AND transaction_date<?2 AND amount_cents<0 AND transaction_type<>'bill_payment'",
+         WHERE transaction_date>=?1 AND transaction_date<?2 AND amount_cents<0
+           AND transaction_type NOT IN ('bill_payment','savings_contribution','debt_payment')",
         params![start, end],
         |r| r.get(0),
     )?;
@@ -224,7 +225,8 @@ pub fn get_dashboard_data(state: State<'_, AppState>) -> AppResult<DashboardData
     let mut cat_stmt = conn.prepare(
         "SELECT COALESCE(t.category_id,'other'),COALESCE(c.name,'Other'),-SUM(t.amount_cents)
          FROM transactions t LEFT JOIN categories c ON c.id=t.category_id
-         WHERE t.transaction_date>=?1 AND t.transaction_date<?2 AND t.amount_cents<0 AND t.transaction_type<>'bill_payment'
+         WHERE t.transaction_date>=?1 AND t.transaction_date<?2 AND t.amount_cents<0
+           AND t.transaction_type NOT IN ('bill_payment','savings_contribution','debt_payment')
          GROUP BY COALESCE(t.category_id,'other'),COALESCE(c.name,'Other')
          ORDER BY -SUM(t.amount_cents) DESC LIMIT 5",
     )?;

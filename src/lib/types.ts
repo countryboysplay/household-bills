@@ -37,6 +37,8 @@ export interface AppBootstrap {
   settings: HouseholdSettings | null;
   databasePath: string;
   backupDirectory: string;
+  /** Set when a pending restore could not be applied at startup. */
+  restoreError: string | null;
 }
 
 export interface DashboardSummary {
@@ -78,6 +80,10 @@ export interface BillListItem {
   nextStatus: string | null;
   assignedPaycheckDate: string | null;
   assignedPaycheckOwner: string | null;
+  /** The bill's configured "may pay up to N days before due" window. */
+  payEarliestDaysBefore: number;
+  /** Amount still owed on the next occurrence, net of payments already recorded. */
+  remainingAmountCents: number;
 }
 
 export interface SaveBillPayload {

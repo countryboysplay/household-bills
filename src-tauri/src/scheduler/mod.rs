@@ -55,6 +55,7 @@ pub struct FundingBucketSummary {
 pub enum WarningCode {
     NoEligibleFundingSource,
     InvalidLockedPaycheck,
+    BillPastDue,
     FundingShortage,
     PartialFunding,
     ProjectedBelowBuffer,
@@ -168,14 +169,19 @@ fn format_money(amount: Money) -> String {
     format!("${}.{:02}", cents / 100, cents % 100)
 }
 
+/// Average of the supplied payment history, rounded half-up to the nearest cent.
+///
+/// Callers choose the window (the database applies each template's
+/// `estimate_window_count`); this averages exactly what it is given. It is the one
+/// implementation of the estimate — truncating a second copy elsewhere would drift
+/// a cent away from what the tests assert.
 pub fn estimate_variable_bill(history: &[Money], fallback: Money) -> Money {
     if history.is_empty() {
         return fallback;
     }
-    let take = history.len().min(6);
-    let values = &history[history.len() - take..];
+    let values = history;
     let total: i64 = values.iter().map(|m| m.value()).sum();
-    let divisor = take as i64;
+    let divisor = values.len() as i64;
     let rounded = if total >= 0 {
         (total + divisor / 2) / divisor
     } else {
@@ -231,21 +237,37 @@ fn build_funding_buckets(input: &ScheduleInput) -> Vec<FundingBucket> {
     buckets
 }
 
+/// A bill whose pay-by date has already passed. The money is still owed, so the
+/// original payment window can no longer decide anything.
+pub fn is_past_due(bill: &BillForSchedule, planning_date: NaiveDate) -> bool {
+    bill.latest_payment_date < planning_date
+}
+
 fn eligible_bucket_indexes(
     bill: &BillForSchedule,
     planning_date: NaiveDate,
     buckets: &[FundingBucket],
 ) -> Vec<usize> {
+    // A past-due bill's window sits entirely behind the planning date, so matching
+    // against it would exclude every bucket and leave the bill permanently
+    // unfundable. Its effective window instead becomes "as soon as possible":
+    // current cash today, or any paycheck from the planning date forward.
+    let past_due = is_past_due(bill, planning_date);
     let mut indexes = Vec::new();
     for (index, bucket) in buckets.iter().enumerate() {
         let eligible = match bucket.source_type {
             FundingSourceType::CurrentCash => {
-                planning_date >= bill.earliest_payment_date
-                    && planning_date <= bill.latest_payment_date
+                past_due
+                    || (planning_date >= bill.earliest_payment_date
+                        && planning_date <= bill.latest_payment_date)
             }
             FundingSourceType::Paycheck => {
-                bucket.date >= bill.earliest_payment_date
-                    && bucket.date <= bill.latest_payment_date
+                if past_due {
+                    bucket.date >= planning_date
+                } else {
+                    bucket.date >= bill.earliest_payment_date
+                        && bucket.date <= bill.latest_payment_date
+                }
             }
         };
         if eligible {
@@ -255,7 +277,33 @@ fn eligible_bucket_indexes(
     indexes
 }
 
-fn payment_date_for(bill: &BillForSchedule, bucket: &FundingBucket) -> NaiveDate {
+/// Buckets in the order this bill should prefer to consume them.
+///
+/// A bill inside its window holds out for the latest eligible source, which keeps
+/// cash available as long as possible. A past-due bill inverts that: it is already
+/// late, so it takes the earliest money it can reach.
+fn funding_preference(
+    bill: &BillForSchedule,
+    planning_date: NaiveDate,
+    eligible: &[usize],
+) -> Vec<usize> {
+    if is_past_due(bill, planning_date) {
+        eligible.to_vec()
+    } else {
+        eligible.iter().rev().copied().collect()
+    }
+}
+
+fn payment_date_for(
+    bill: &BillForSchedule,
+    bucket: &FundingBucket,
+    planning_date: NaiveDate,
+) -> NaiveDate {
+    // A late bill is paid as soon as it is funded. Echoing its original due date
+    // back would recommend a payment date that is already in the past.
+    if is_past_due(bill, planning_date) {
+        return bucket.date.max(planning_date);
+    }
     match bill.payment_type {
         PaymentType::Autopay => bill.due_date,
         PaymentType::Manual => bucket.date,
@@ -267,6 +315,7 @@ fn allocation_for(
     bucket: &FundingBucket,
     amount: Money,
     reason_code: ScheduleReasonCode,
+    planning_date: NaiveDate,
 ) -> BillAllocationResult {
     BillAllocationResult {
         bill_id: bill.id.clone(),
@@ -276,7 +325,7 @@ fn allocation_for(
         },
         funding_source_type: bucket.source_type,
         amount,
-        payment_date: payment_date_for(bill, bucket),
+        payment_date: payment_date_for(bill, bucket, planning_date),
         reason_code,
     }
 }
@@ -324,6 +373,19 @@ fn allocate_bills(
             continue;
         }
 
+        if is_past_due(&bill, input.planning_date) {
+            warnings.push(ScheduleWarning {
+                code: WarningCode::BillPastDue,
+                entity_id: Some(bill.id.clone()),
+                date: Some(bill.latest_payment_date),
+                amount: Some(bill.amount),
+                message: format!(
+                    "Bill {} is past its pay-by date and is scheduled from the soonest available funds.",
+                    bill.id
+                ),
+            });
+        }
+
         let eligible = eligible_bucket_indexes(&bill, input.planning_date, buckets);
         if eligible.is_empty() {
             unresolved.push(bill.id.clone());
@@ -367,6 +429,7 @@ fn allocate_bills(
                 &buckets[bucket_index],
                 bill.amount,
                 ScheduleReasonCode::UserLock,
+                input.planning_date,
             );
             allocations.push(allocation);
             push_shortage_warning(warnings, &bill, &buckets[bucket_index]);
@@ -382,16 +445,18 @@ fn allocate_bills(
                         &buckets[bucket_index],
                         bill.amount,
                         ScheduleReasonCode::StableExistingAssignment,
+                        input.planning_date,
                     ));
                     continue;
                 }
             }
         }
 
-        let latest_index = *eligible.last().expect("eligible is not empty");
-        if buckets[latest_index].remaining() >= bill.amount {
-            buckets[latest_index].consume_bill(bill.amount);
-            let reason = match buckets[latest_index].source_type {
+        let preference = funding_preference(&bill, input.planning_date, &eligible);
+        let preferred_index = *preference.first().expect("eligible is not empty");
+        if buckets[preferred_index].remaining() >= bill.amount {
+            buckets[preferred_index].consume_bill(bill.amount);
+            let reason = match buckets[preferred_index].source_type {
                 FundingSourceType::CurrentCash => ScheduleReasonCode::CurrentCash,
                 FundingSourceType::Paycheck => match bill.payment_type {
                     PaymentType::Autopay => ScheduleReasonCode::AutopayLatestEligiblePaycheck,
@@ -400,26 +465,27 @@ fn allocate_bills(
             };
             allocations.push(allocation_for(
                 &bill,
-                &buckets[latest_index],
+                &buckets[preferred_index],
                 bill.amount,
                 reason,
+                input.planning_date,
             ));
             continue;
         }
 
-        if let Some(earlier_index) = eligible
+        if let Some(fallback_index) = preference
             .iter()
-            .rev()
             .copied()
             .skip(1)
             .find(|idx| buckets[*idx].remaining() >= bill.amount)
         {
-            buckets[earlier_index].consume_bill(bill.amount);
+            buckets[fallback_index].consume_bill(bill.amount);
             allocations.push(allocation_for(
                 &bill,
-                &buckets[earlier_index],
+                &buckets[fallback_index],
                 bill.amount,
                 ScheduleReasonCode::MovedEarlierToProtectBuffer,
+                input.planning_date,
             ));
             continue;
         }
@@ -431,7 +497,7 @@ fn allocate_bills(
         // funding/reservation.
         let mut remaining = bill.amount;
         let mut bill_allocations = Vec::new();
-        for bucket_index in eligible.iter().rev().copied() {
+        for bucket_index in preference.iter().copied() {
             let available = buckets[bucket_index].remaining().max(Money::ZERO);
             if available.is_zero() {
                 continue;
@@ -443,11 +509,13 @@ fn allocate_bills(
             } else {
                 ScheduleReasonCode::ReservedAcrossPaychecks
             };
-            let mut allocation = allocation_for(&bill, &buckets[bucket_index], part, reason);
+            let mut allocation =
+                allocation_for(&bill, &buckets[bucket_index], part, reason, input.planning_date);
             // A non-splittable bill is still one payment. Earlier paychecks merely
             // reserve funds; the recommended payment date remains the latest safe
-            // date in the bill's window.
-            if !bill.can_split {
+            // date in the bill's window. A past-due bill has no such date left, so
+            // `allocation_for` already pinned it to the soonest funded date.
+            if !bill.can_split && !is_past_due(&bill, input.planning_date) {
                 allocation.payment_date = bill.latest_payment_date;
             }
             bill_allocations.push(allocation);
@@ -1005,6 +1073,31 @@ mod tests {
     }
 
     #[test]
+    fn variable_bill_estimate_rounds_half_up_rather_than_truncating() {
+        // 100_247 / 6 = 16_707.83. Truncation gives 16_707, which is what the
+        // production path used to return while this helper returned 16_708.
+        let values = [17_381, 16_244, 17_622, 16_890, 15_933, 16_177].map(Money::cents);
+        let truncated = values.iter().map(|m| m.value()).sum::<i64>() / values.len() as i64;
+        assert_eq!(truncated, 16_707);
+        assert_eq!(estimate_variable_bill(&values, Money::ZERO), Money::cents(16_708));
+    }
+
+    #[test]
+    fn variable_bill_estimate_averages_exactly_what_it_is_given() {
+        // Windowing belongs to the caller, so more than six values are all averaged.
+        let values = [10_000, 20_000, 30_000, 40_000, 50_000, 60_000, 70_000].map(Money::cents);
+        assert_eq!(estimate_variable_bill(&values, Money::ZERO), Money::cents(40_000));
+    }
+
+    #[test]
+    fn variable_bill_estimate_falls_back_when_there_is_no_history() {
+        assert_eq!(
+            estimate_variable_bill(&[], Money::cents(12_345)),
+            Money::cents(12_345)
+        );
+    }
+
+    #[test]
     fn latest_eligible_paycheck_is_selected() {
         let paychecks = vec![
             p("p1", "2026-08-01", 200_000),
@@ -1280,5 +1373,99 @@ mod tests {
     #[test]
     fn weekend_date_moves_to_prior_business_day() {
         assert_eq!(prior_business_day(d("2026-08-16")), d("2026-08-14"));
+    }
+
+    fn past_due_bill(id: &str, earliest: &str, latest: &str, amount: i64) -> BillForSchedule {
+        let mut b = bill(id, latest, amount, PaymentType::Manual);
+        b.earliest_payment_date = d(earliest);
+        b.latest_payment_date = d(latest);
+        b
+    }
+
+    #[test]
+    fn past_due_bill_is_funded_instead_of_permanently_unresolvable() {
+        // Regression: a bill whose pay-by date had passed matched no funding bucket
+        // at all, so it reported NoEligibleFundingSource on every run and no user
+        // action could ever fund it.
+        let overdue = past_due_bill("late-electric", "2026-07-10", "2026-07-20", 18_422);
+        let result = build_plan(&input(
+            100_000,
+            50_000,
+            vec![p("p1", "2026-08-14", 268_012)],
+            vec![overdue],
+        ));
+
+        assert!(
+            result.unresolved_bill_ids.is_empty(),
+            "a past-due bill must still be schedulable, got {:?}",
+            result.unresolved_bill_ids
+        );
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.code == WarningCode::BillPastDue));
+        assert!(!result
+            .warnings
+            .iter()
+            .any(|w| w.code == WarningCode::NoEligibleFundingSource));
+
+        let allocation = result
+            .allocations
+            .iter()
+            .find(|a| a.bill_id == "late-electric")
+            .expect("past-due bill must receive an allocation");
+        assert_eq!(allocation.funding_source_type, FundingSourceType::CurrentCash);
+        assert_eq!(allocation.amount, Money::cents(18_422));
+        assert!(
+            allocation.payment_date >= d("2026-08-01"),
+            "must not recommend a payment date in the past, got {}",
+            allocation.payment_date
+        );
+    }
+
+    #[test]
+    fn past_due_bill_takes_the_soonest_paycheck_when_cash_is_short() {
+        // Inside its window a bill holds out for the latest eligible paycheck.
+        // A late bill inverts that and grabs the earliest money it can reach.
+        let overdue = past_due_bill("late-rent", "2026-07-01", "2026-07-15", 110_000);
+        let result = build_plan(&input(
+            50_000, // entirely consumed by the protected buffer
+            50_000,
+            vec![p("p1", "2026-08-14", 268_012), p("p2", "2026-08-28", 268_012)],
+            vec![overdue],
+        ));
+
+        assert!(result.unresolved_bill_ids.is_empty());
+        let allocation = result
+            .allocations
+            .iter()
+            .find(|a| a.bill_id == "late-rent")
+            .expect("past-due bill must receive an allocation");
+        assert_eq!(
+            allocation.paycheck_id.as_deref(),
+            Some("p1"),
+            "a late bill takes the soonest paycheck, not the latest"
+        );
+    }
+
+    #[test]
+    fn bill_inside_its_window_still_prefers_the_latest_eligible_paycheck() {
+        // Guards the fix above from inverting normal scheduling.
+        let mut b = bill("electric", "2026-08-30", 18_422, PaymentType::Manual);
+        b.earliest_payment_date = d("2026-08-01");
+        b.latest_payment_date = d("2026-08-30");
+        let result = build_plan(&input(
+            100_000,
+            50_000,
+            vec![p("p1", "2026-08-14", 268_012), p("p2", "2026-08-28", 268_012)],
+            vec![b],
+        ));
+
+        let allocation = result
+            .allocations
+            .iter()
+            .find(|a| a.bill_id == "electric")
+            .expect("bill must receive an allocation");
+        assert_eq!(allocation.paycheck_id.as_deref(), Some("p2"));
     }
 }

@@ -110,10 +110,10 @@ fn estimate_for_template(conn: &Connection, template_id: &str, fallback: i64, wi
     let values = stmt
         .query_map(params![template_id, window.max(1)], |r| r.get::<_, i64>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    if values.is_empty() {
-        return Ok(fallback.max(0));
-    }
-    Ok(values.iter().sum::<i64>() / i64::try_from(values.len()).unwrap_or(1))
+    // Delegate to the scheduler's estimator so there is exactly one rounding rule.
+    // A second, truncating average here drifts a cent from what the tests assert.
+    let history = values.into_iter().map(Money::cents).collect::<Vec<_>>();
+    Ok(scheduler::estimate_variable_bill(&history, Money::cents(fallback.max(0))).value())
 }
 
 fn ensure_template_occurrences(conn: &Connection, template_id: &str, through: NaiveDate) -> AppResult<()> {
@@ -185,6 +185,25 @@ fn ensure_template_occurrences(conn: &Connection, template_id: &str, through: Na
                 ],
             )?;
         }
+
+        // `INSERT OR IGNORE` cannot refresh a row that already exists, so a new
+        // rolling average would otherwise only reach occurrences beyond the
+        // pre-generated horizon. Push the re-estimate onto future occurrences that
+        // the household has not already pinned or started paying.
+        if amount_type == "variable" {
+            conn.execute(
+                "UPDATE bill_occurrences
+                    SET estimated_amount_cents=?2, updated_at=CURRENT_TIMESTAMP
+                  WHERE bill_template_id=?1
+                    AND status IN ('upcoming','scheduled')
+                    AND due_date>=date('now','localtime')
+                    AND manual_amount_override_cents IS NULL
+                    AND actual_required_amount_cents IS NULL
+                    AND estimated_amount_cents<>?2
+                    AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.bill_occurrence_id=bill_occurrences.id)",
+                params![template_id, estimate],
+            )?;
+        }
     }
     Ok(())
 }
@@ -224,6 +243,11 @@ pub struct BillListItemDto {
     pub next_status: Option<String>,
     pub assigned_paycheck_date: Option<String>,
     pub assigned_paycheck_owner: Option<String>,
+    /// The bill's configured "may pay up to N days before due" window.
+    pub pay_earliest_days_before: i64,
+    /// Amount still owed on the next occurrence, net of payments already recorded.
+    /// `amount_cents` remains the full bill amount for display.
+    pub remaining_amount_cents: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,7 +292,8 @@ fn list_bills_from_conn(conn: &Connection) -> AppResult<Vec<BillListItemDto>> {
     let mut stmt = conn.prepare(
         "SELECT t.id,t.name,t.category_id,COALESCE(c.name,'Other'),t.amount_type,
                 CASE WHEN t.amount_type='fixed' THEN COALESCE(t.fixed_amount_cents,0) ELSE COALESCE(t.fallback_estimate_cents,0) END,
-                t.due_day,t.recurrence_type,t.payment_type,t.priority,t.can_split,t.assigned_user_id,u.display_name
+                t.due_day,t.recurrence_type,t.payment_type,t.priority,t.can_split,t.assigned_user_id,u.display_name,
+                COALESCE(t.pay_earliest_days_before,31)
          FROM bill_templates t
          LEFT JOIN categories c ON c.id=t.category_id
          LEFT JOIN users u ON u.id=t.assigned_user_id
@@ -281,15 +306,17 @@ fn list_bills_from_conn(conn: &Connection) -> AppResult<Vec<BillListItemDto>> {
                 r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?, r.get::<_, i64>(5)?, r.get::<_, Option<i64>>(6)?, r.get::<_, String>(7)?,
                 r.get::<_, String>(8)?, r.get::<_, String>(9)?, r.get::<_, i64>(10)? == 1,
-                r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?,
+                r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?, r.get::<_, i64>(13)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut out = Vec::new();
-    for (id,name,category_id,category_name,amount_type,base_amount,due_day,recurrence_type,payment_type,priority,can_split,assigned_user_id,assigned_user_name) in base {
+    for (id,name,category_id,category_name,amount_type,base_amount,due_day,recurrence_type,payment_type,priority,can_split,assigned_user_id,assigned_user_name,pay_earliest_days_before) in base {
         let next = conn.query_row(
-            "SELECT o.id,o.due_date,o.latest_payment_date,o.status,p.pay_date,u.display_name,o.estimated_amount_cents
+            "SELECT o.id,o.due_date,o.latest_payment_date,o.status,p.pay_date,u.display_name,o.estimated_amount_cents,
+                    MAX(COALESCE(o.actual_required_amount_cents,o.manual_amount_override_cents,o.estimated_amount_cents)
+                        -COALESCE((SELECT SUM(pay.amount_cents) FROM payments pay WHERE pay.bill_occurrence_id=o.id),0),0)
              FROM bill_occurrences o
              LEFT JOIN bill_allocations a ON a.bill_occurrence_id=o.id
              LEFT JOIN paycheck_occurrences p ON p.id=a.paycheck_occurrence_id
@@ -298,13 +325,13 @@ fn list_bills_from_conn(conn: &Connection) -> AppResult<Vec<BillListItemDto>> {
              WHERE o.bill_template_id=?1 AND o.status IN ('upcoming','scheduled','partial','late')
              ORDER BY o.due_date, p.pay_date DESC, a.created_at LIMIT 1",
             [id.as_str()],
-            |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?)),
+            |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,Option<String>>(4)?,r.get::<_,Option<String>>(5)?,r.get::<_,i64>(6)?,r.get::<_,i64>(7)?)),
         ).optional()?;
-        let (next_occurrence_id,next_due_date,next_pay_by_date,next_status,assigned_paycheck_date,assigned_paycheck_owner,amount_cents) = match next {
-            Some((oid,d,pay_by,s,pd,po,a)) => (Some(oid),Some(d),Some(pay_by),Some(s),pd,po,a),
-            None => (None,None,None,None,None,None,base_amount),
+        let (next_occurrence_id,next_due_date,next_pay_by_date,next_status,assigned_paycheck_date,assigned_paycheck_owner,amount_cents,remaining_amount_cents) = match next {
+            Some((oid,d,pay_by,s,pd,po,a,rem)) => (Some(oid),Some(d),Some(pay_by),Some(s),pd,po,a,rem),
+            None => (None,None,None,None,None,None,base_amount,base_amount),
         };
-        out.push(BillListItemDto { id,name,category_id,category_name,amount_type,amount_cents,due_day,recurrence_type,payment_type,priority,can_split,assigned_user_id,assigned_user_name,next_occurrence_id,next_due_date,next_pay_by_date,next_status,assigned_paycheck_date,assigned_paycheck_owner });
+        out.push(BillListItemDto { id,name,category_id,category_name,amount_type,amount_cents,due_day,recurrence_type,payment_type,priority,can_split,assigned_user_id,assigned_user_name,next_occurrence_id,next_due_date,next_pay_by_date,next_status,assigned_paycheck_date,assigned_paycheck_owner,pay_earliest_days_before,remaining_amount_cents });
     }
     Ok(out)
 }
@@ -344,12 +371,27 @@ pub fn save_bill(payload: SaveBillPayload, state: State<'_, AppState>) -> AppRes
                 due_day=?13,pay_earliest_days_before=?14,notes=?15,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
             params![id,payload.name.trim(),payload.category_id,payload.amount_type,fixed,fallback,payload.recurrence_type,recurrence_json,payload.payment_type,payload.priority,if payload.can_split {1}else{0},payload.assigned_user_id,payload.due_day,earliest,payload.notes],
         )?;
+        // A one-time bill has exactly one occurrence, and editing it means replacing
+        // that occurrence even once its due date has passed — otherwise the edit is
+        // silently discarded. Monthly bills keep the future-only rule so that
+        // past-due occurrences are not erased. Neither branch ever removes an
+        // occurrence with recorded payments.
+        let regenerable: &str = if payload.recurrence_type == "one_time" {
+            "SELECT id FROM bill_occurrences
+              WHERE bill_template_id=?1 AND status!='paid'
+                AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.bill_occurrence_id=bill_occurrences.id)"
+        } else {
+            "SELECT id FROM bill_occurrences
+              WHERE bill_template_id=?1 AND due_date>=date('now','localtime')
+                AND status IN ('upcoming','scheduled')
+                AND NOT EXISTS (SELECT 1 FROM payments p WHERE p.bill_occurrence_id=bill_occurrences.id)"
+        };
         tx.execute(
-            "DELETE FROM bill_allocations WHERE bill_occurrence_id IN (SELECT id FROM bill_occurrences WHERE bill_template_id=?1 AND due_date>=date('now','localtime') AND status IN ('upcoming','scheduled'))",
+            &format!("DELETE FROM bill_allocations WHERE bill_occurrence_id IN ({regenerable})"),
             [id.as_str()],
         )?;
         tx.execute(
-            "DELETE FROM bill_occurrences WHERE bill_template_id=?1 AND due_date>=date('now','localtime') AND status IN ('upcoming','scheduled')",
+            &format!("DELETE FROM bill_occurrences WHERE id IN ({regenerable})"),
             [id.as_str()],
         )?;
     } else {
@@ -366,12 +408,20 @@ pub fn save_bill(payload: SaveBillPayload, state: State<'_, AppState>) -> AppRes
         let due_text = payload.one_time_due_date.as_deref().unwrap_or_default();
         let due = parse_date(due_text, "one-time due date")?;
         let earliest_date = (due - Duration::days(earliest)).min(due);
-        tx.execute(
+        let inserted = tx.execute(
             "INSERT OR IGNORE INTO bill_occurrences(id,bill_template_id,name_snapshot,category_id,due_date,latest_payment_date,earliest_payment_date,
              estimated_amount_cents,status,payment_type_snapshot,priority_snapshot,is_one_time)
              VALUES(?1,?2,?3,?4,?5,?5,?6,?7,'upcoming',?8,?9,1)",
             params![Uuid::new_v4().to_string(),id,payload.name.trim(),payload.category_id,due_text,date_string(earliest_date),payload.amount_cents,payload.payment_type,payload.priority],
         )?;
+        // The unique (template, due date) index turns a collision into a silent
+        // no-op. The only rows the delete above leaves behind are ones with
+        // recorded payments, so say that plainly instead of reporting success.
+        if inserted == 0 {
+            return Err(AppError::Validation(
+                "this bill already has an occurrence on that date with recorded payments. Remove the payment first, or choose a different due date.".into(),
+            ));
+        }
     }
     tx.execute(
         "INSERT INTO activity_log(id,user_id,event_type,entity_type,entity_id,summary) VALUES(?1,?2,'bill_saved','bill',?3,?4)",
@@ -1002,6 +1052,15 @@ fn persist_schedule(conn: &mut Connection, input: &ScheduleInput, result: &Sched
     }
     let unresolved: std::collections::HashSet<&str> = result.unresolved_bill_ids.iter().map(String::as_str).collect();
     for allocation in &result.allocations {
+        // A locked allocation survives the DELETE above, so re-inserting the
+        // scheduler's own row for the same occurrence would leave two rows and
+        // double-count the bill. The user's lock wins.
+        let locked: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM bill_allocations WHERE bill_occurrence_id=?1 AND is_locked=1",
+            [allocation.bill_id.as_str()],
+            |r| r.get(0),
+        )?;
+        if locked > 0 { continue; }
         tx.execute(
             "INSERT INTO bill_allocations(id,bill_occurrence_id,paycheck_occurrence_id,funding_source_type,allocated_amount_cents,source,is_locked,reason_code,recommended_payment_date)
              VALUES(?1,?2,?3,?4,?5,'scheduler',0,?6,?7)",
@@ -1100,6 +1159,11 @@ fn planner_from_result(conn:&Connection,input:&ScheduleInput,result:&ScheduleRes
             scheduler::WarningCode::NoEligibleFundingSource => format!(
                 "{} has no paycheck or available cash inside its allowed payment window.",
                 bill_name.unwrap_or("A bill")
+            ),
+            scheduler::WarningCode::BillPastDue => format!(
+                "{} is past due{}. It is scheduled from the soonest available money.",
+                bill_name.unwrap_or("A bill"),
+                w.date.map(|d| format!(" (was due {})", date_string(d))).unwrap_or_default()
             ),
             scheduler::WarningCode::OptionalCommitmentReduced => {
                 let name=w.entity_id.as_deref().map(&commitment_label).unwrap_or_else(||"Optional savings/debt plan".into());
