@@ -29,6 +29,14 @@ jobs:
         if: github.event_name == 'pull_request' && github.base_ref == 'main'
         shell: pwsh
         run: ./scripts/check-release-version.ps1
+      # Only on release PRs: cargo test builds the debug profile, where the
+      # windows_subsystem attribute is deliberately inert, so a console-subsystem
+      # regression is invisible until a release build exists. Costs a release
+      # compile, which is why it is scoped to PRs into main rather than every push.
+      - name: Verify the release binary is a GUI app, not a console app
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        shell: pwsh
+        run: ./scripts/check-windows-subsystem.ps1
       - name: Create current testing source ZIP
         if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
         shell: pwsh
