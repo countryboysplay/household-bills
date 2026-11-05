@@ -58,7 +58,8 @@ fn main() {
             cmd: cmd.to_string(),
             callback: CallbackFn(0),
             error: CallbackFn(1),
-            url: "tauri://localhost".parse().unwrap(),
+            // The app's own origin, which its capability allows ("local"); Windows serves it over http.
+            url: if cfg!(windows) { "http://tauri.localhost" } else { "tauri://localhost" }.parse().unwrap(),
             body: InvokeBody::Json(args),
             headers: Default::default(),
             invoke_key: invoke_key.clone(),
