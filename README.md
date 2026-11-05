@@ -72,6 +72,26 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 This runs the frontend TypeScript check, Tauri command permission checks, and Rust tests.
 
+### End-to-end tests
+
+```powershell
+npx playwright install chromium   # once
+npm run e2e
+```
+
+Playwright drives the real UI in headless Chromium against the real Rust commands. They are served
+by the dev-only browser bridge (`src-tauri/examples/browser_bridge.rs`), which keeps its own data
+folder and starts from an empty household, so your real data is never touched.
+
+To click through the app yourself in a normal browser:
+
+```powershell
+cargo run --example browser_bridge --manifest-path src-tauri/Cargo.toml   # terminal 1
+$env:HB_BRIDGE = "1"; npm run dev:frontend                                 # terminal 2
+```
+
+Then open http://127.0.0.1:1420.
+
 See `PHASE5_WINDOWS_TEST.md` for the functional acceptance test.
 
 ## Build `.exe` installer

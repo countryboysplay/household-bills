@@ -1,5 +1,5 @@
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Runtime, State};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::{backup, AppState};
@@ -13,7 +13,7 @@ pub struct UpdateStatusDto {
 }
 
 #[tauri::command]
-pub async fn check_for_update(app: AppHandle) -> Result<UpdateStatusDto, String> {
+pub async fn check_for_update<R: Runtime>(app: AppHandle<R>) -> Result<UpdateStatusDto, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let updater = app.updater().map_err(|e| format!("Updater could not start: {e}"))?;
     let update = updater
@@ -36,7 +36,7 @@ pub async fn check_for_update(app: AppHandle) -> Result<UpdateStatusDto, String>
 }
 
 #[tauri::command]
-pub async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn install_update<R: Runtime>(app: AppHandle<R>, state: State<'_, AppState>) -> Result<(), String> {
     // Financial data gets a local safety snapshot immediately before every
     // application update. Never hold the database mutex while downloading.
     {

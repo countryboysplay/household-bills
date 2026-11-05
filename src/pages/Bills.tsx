@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { archiveBill, getBillDetail, getPaymentGuidance, listBills, markBillPaid, saveBill } from "../lib/backend";
 import { dollarsToCents, formatMoney } from "../lib/money";
 import { todayText } from "../lib/dates";
-import type { BillDetail, BillListItem, PaymentGuidanceView, SaveBillPayload, UserProfile } from "../lib/types";
+import type { BillDetail, BillListItem, BillRecurrence, PaymentGuidanceView, SaveBillPayload, UserProfile } from "../lib/types";
 
 type BillFormState = {
   id?: string;
@@ -10,7 +10,7 @@ type BillFormState = {
   categoryId: string;
   amountType: "fixed" | "variable";
   amount: string;
-  recurrenceType: "monthly" | "one_time";
+  recurrenceType: BillRecurrence;
   dueDay: string;
   oneTimeDueDate: string;
   paymentType: "manual" | "autopay";
@@ -25,6 +25,8 @@ const emptyForm = (): BillFormState => ({
   name:"",categoryId:"utilities",amountType:"fixed",amount:"",recurrenceType:"monthly",dueDay:"15",oneTimeDueDate:"",
   paymentType:"manual",priority:"normal",canSplit:false,assignedUserId:"",earliestDays:"31",notes:"",
 });
+
+const recurrenceLabels: Record<BillRecurrence, string> = { monthly:"Monthly", quarterly:"Every 3 Months", semiannual:"Every 6 Months", annual:"Yearly", one_time:"One-Time" };
 
 const categoryOptions = [
   ["housing","Housing"],["utilities","Utilities"],["insurance","Insurance"],["debt","Debt"],["other","Other"],
@@ -76,7 +78,7 @@ export function Bills({ users, onChanged }: { users: UserProfile[]; onChanged: (
 
   const edit=(bill:BillListItem)=>setForm({
     id:bill.id,name:bill.name,categoryId:bill.categoryId??"other",amountType:bill.amountType,amount:(bill.amountCents/100).toFixed(2),
-    recurrenceType:bill.recurrenceType,dueDay:String(bill.dueDay??15),oneTimeDueDate:bill.recurrenceType==="one_time"?(bill.nextDueDate??""):"",
+    recurrenceType:bill.recurrenceType,dueDay:String(bill.dueDay??15),oneTimeDueDate:bill.recurrenceType==="one_time"?(bill.nextDueDate??""):bill.recurrenceType==="monthly"?"":(bill.firstDueDate??bill.nextDueDate??""),
     paymentType:bill.paymentType,priority:bill.priority,canSplit:bill.canSplit,assignedUserId:bill.assignedUserId??"",earliestDays:String(bill.payEarliestDaysBefore),notes:detail?.bill.id===bill.id?(detail.notes??""):"",
   });
 
@@ -85,7 +87,7 @@ export function Bills({ users, onChanged }: { users: UserProfile[]; onChanged: (
     setBusy(true);setError("");
     try{
       const payload:SaveBillPayload={id:form.id??null,name:form.name,categoryId:form.categoryId,amountType:form.amountType,amountCents:dollarsToCents(form.amount),
-        dueDay:form.recurrenceType==="monthly"?Number(form.dueDay):null,recurrenceType:form.recurrenceType,oneTimeDueDate:form.recurrenceType==="one_time"?form.oneTimeDueDate:null,
+        dueDay:form.recurrenceType==="monthly"?Number(form.dueDay):null,recurrenceType:form.recurrenceType,oneTimeDueDate:form.recurrenceType==="one_time"?form.oneTimeDueDate:null,firstDueDate:form.recurrenceType!=="one_time"&&form.recurrenceType!=="monthly"?form.oneTimeDueDate:null,
         paymentType:form.paymentType,priority:form.priority,canSplit:form.canSplit,assignedUserId:form.assignedUserId||null,payEarliestDaysBefore:form.earliestDays.trim()===""||!Number.isFinite(Number(form.earliestDays))?31:Number(form.earliestDays),notes:form.notes||null};
       const id=await saveBill(payload); setForm(null); await load(id); await onChanged();
     }catch(e){setError(e instanceof Error?e.message:String(e));}finally{setBusy(false)}
@@ -128,7 +130,7 @@ export function Bills({ users, onChanged }: { users: UserProfile[]; onChanged: (
         {shown.map(b=><button className={`bill-table-row ${selectedId===b.id?"selected":""}`} key={b.id} onClick={()=>setSelectedId(b.id)}>
           <span className="bill-name-cell"><i>{iconFor(b.categoryId)}</i><span><strong>{b.name}</strong><small>{b.categoryName}</small></span></span>
           <span><strong>{formatMoney(b.amountCents)}</strong><small>{b.amountType==="variable"?"Estimated":"Fixed"}</small></span>
-          <span><strong>{b.recurrenceType==="monthly"?ordinal(b.dueDay??1):formatShortDate(b.nextDueDate)}</strong><small>{b.nextDueDate?`Due: ${formatShortDate(b.nextDueDate)}`:""}{b.nextPayByDate&&b.nextDueDate&&b.nextPayByDate!==b.nextDueDate?` • Plan by ${formatShortDate(b.nextPayByDate)}`:""}</small></span>
+          <span><strong>{b.recurrenceType==="monthly"?ordinal(b.dueDay??1):b.recurrenceType==="one_time"?formatShortDate(b.nextDueDate):recurrenceLabels[b.recurrenceType]}</strong><small>{b.nextDueDate?`Due: ${formatShortDate(b.nextDueDate)}`:""}{b.nextPayByDate&&b.nextDueDate&&b.nextPayByDate!==b.nextDueDate?` • Plan by ${formatShortDate(b.nextPayByDate)}`:""}</small></span>
           <span><em className={`type-chip ${b.paymentType}`}>{b.paymentType==="autopay"?"Autopay":"Manual"}</em></span>
           <span><em className="status-chip good">{b.nextStatus??"Active"}</em></span>
           <span><strong>{b.assignedPaycheckDate?formatShortDate(b.assignedPaycheckDate):"Not scheduled"}</strong><small>{b.assignedPaycheckOwner??""}</small></span>
@@ -148,7 +150,7 @@ export function Bills({ users, onChanged }: { users: UserProfile[]; onChanged: (
     {form&&<div className="modal-backdrop"><div className="modal bill-form-modal"><div className="modal-header"><div><h2>{form.id?"Edit Bill":"Add Bill"}</h2><p>Enter the details the scheduler needs.</p></div><button onClick={()=>setForm(null)}>×</button></div>
       <div className="form-sections"><section><h3>Basic Information</h3><div className="editor-grid"><label>Bill Name<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label><label>Category<select value={form.categoryId} onChange={e=>setForm({...form,categoryId:e.target.value})}>{categoryOptions.map(x=><option value={x[0]} key={x[0]}>{x[1]}</option>)}</select></label>
       <label>Amount Type<select value={form.amountType} onChange={e=>setForm({...form,amountType:e.target.value as BillFormState["amountType"]})}><option value="fixed">Fixed</option><option value="variable">Variable / Estimated</option></select></label><label>{form.amountType==="variable"?"Current Estimate":"Amount"}<input value={form.amount} onChange={e=>setForm({...form,amount:e.target.value})} placeholder="0.00"/></label>
-      <label>Recurrence<select value={form.recurrenceType} onChange={e=>setForm({...form,recurrenceType:e.target.value as BillFormState["recurrenceType"]})}><option value="monthly">Monthly</option><option value="one_time">One-Time</option></select></label>{form.recurrenceType==="monthly"?<label>Due Day<input type="number" min="1" max="31" value={form.dueDay} onChange={e=>setForm({...form,dueDay:e.target.value})}/></label>:<label>Due Date<input type="date" value={form.oneTimeDueDate} onChange={e=>setForm({...form,oneTimeDueDate:e.target.value})}/></label>}
+      <label>Recurrence<select value={form.recurrenceType} onChange={e=>setForm({...form,recurrenceType:e.target.value as BillRecurrence})}>{(Object.keys(recurrenceLabels) as BillRecurrence[]).map(r=><option value={r} key={r}>{recurrenceLabels[r]}</option>)}</select></label>{form.recurrenceType==="monthly"?<label>Due Day<input type="number" min="1" max="31" value={form.dueDay} onChange={e=>setForm({...form,dueDay:e.target.value})}/></label>:<label>{form.recurrenceType==="one_time"?"Due Date":"First Due Date"}<input type="date" value={form.oneTimeDueDate} onChange={e=>setForm({...form,oneTimeDueDate:e.target.value})}/></label>}
       <label>Payment Type<select value={form.paymentType} onChange={e=>setForm({...form,paymentType:e.target.value as BillFormState["paymentType"]})}><option value="manual">Manual</option><option value="autopay">Autopay</option></select></label><label>Priority<select value={form.priority} onChange={e=>setForm({...form,priority:e.target.value as BillFormState["priority"]})}><option value="essential">Essential</option><option value="normal">Normal</option><option value="flexible">Flexible</option></select></label>
       <label>Responsible For<select value={form.assignedUserId} onChange={e=>setForm({...form,assignedUserId:e.target.value})}><option value="">Shared</option>{users.map(u=><option value={u.id} key={u.id}>{u.displayName}</option>)}</select></label><label>May Pay Up To<input type="number" min="0" max="365" value={form.earliestDays} onChange={e=>setForm({...form,earliestDays:e.target.value})}/><small>days before due date</small></label></div>
       <label className="check-line"><input type="checkbox" checked={form.canSplit} onChange={e=>setForm({...form,canSplit:e.target.checked})}/> Allow partial payments to the bill provider</label><label>Notes<textarea value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})} rows={3}/></label></section></div>

@@ -1,6 +1,6 @@
 [package]
 name = "household-bills"
-version = "1.0.3"
+version = "1.0.4"
 description = "Local household bill and paycheck planner"
 authors = ["Household Bills"]
 edition = "2021"
@@ -21,3 +21,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 tauri-plugin-updater = "2"
+
+[dev-dependencies]
+# browser bridge example only (examples/browser_bridge.rs)
+tauri = { version = "2", features = ["test"] }
