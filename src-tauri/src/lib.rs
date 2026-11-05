@@ -26,8 +26,15 @@ pub struct AppState {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    builder::<tauri::Wry>()
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .run(tauri::generate_context!())
+        .expect("error while running Household Bills");
+}
+
+/// Setup and commands without the updater plugin, so a mock runtime (browser bridge) can host them.
+pub fn builder<R: tauri::Runtime>() -> tauri::Builder<R> {
+    tauri::Builder::<R>::new()
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir().map_err(|e| std::io::Error::other(format!("app data directory unavailable: {e}")))?;
             fs::create_dir_all(&app_data_dir)?;
@@ -112,6 +119,4 @@ pub fn run() {
             updates::check_for_update,
             updates::install_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Household Bills");
 }
