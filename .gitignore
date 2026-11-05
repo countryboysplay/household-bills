@@ -50,3 +50,5 @@ Desktop.ini
 .idea/
 # TypeScript build cache
 *.tsbuildinfo
+test-results/
+playwright-report/

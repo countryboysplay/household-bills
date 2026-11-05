@@ -1,6 +1,7 @@
 //! Dev-only: serves the real Rust commands over HTTP so the frontend can run in a normal browser.
 //! `cargo run --example browser_bridge` then `HB_BRIDGE=1 npm run dev:frontend`.
-//! Uses the real tauri.conf.json/capabilities on a mock runtime; data goes to that platform's app-data dir.
+//! Uses the real tauri.conf.json/capabilities on a mock runtime. Data lives under a separate identifier
+//! (HB_BRIDGE_IDENTIFIER, default com.householdbills.browserbridge); HB_BRIDGE_FRESH=1 wipes it first.
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use tauri::Manager;
@@ -9,9 +10,16 @@ use tauri::test::{get_ipc_response, MockRuntime};
 use tauri::webview::InvokeRequest;
 
 fn main() {
-    let mut app = household_bills_lib::builder::<MockRuntime>()
-        .build(tauri::generate_context!())
-        .expect("build app");
+    // Never the real app's identifier, so the bridge cannot touch real household data.
+    let mut context = tauri::generate_context!();
+    context.config_mut().identifier =
+        std::env::var("HB_BRIDGE_IDENTIFIER").unwrap_or_else(|_| "com.householdbills.browserbridge".into());
+    let mut app = household_bills_lib::builder::<MockRuntime>().build(context).expect("build app");
+    if std::env::var("HB_BRIDGE_FRESH").as_deref() == Ok("1") {
+        // Before setup opens the database: start from an empty household (end-to-end tests).
+        let dir = app.path().app_data_dir().expect("app data dir");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     // One iteration runs the app's setup hook (DB, managed state) and creates the "main" window from tauri.conf.json.
     #[allow(deprecated)]
     app.run_iteration(|_, _| {});
@@ -60,7 +68,7 @@ fn main() {
             Ok(InvokeResponseBody::Raw(b)) => ("200 OK", b),
             Err(e) => ("400 Bad Request", e.to_string().into_bytes()),
         };
-        eprintln!("{cmd} -> {status}");
+        if !status.starts_with("200") { eprintln!("{cmd} -> {status}"); }
         let head = format!("HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", out.len());
         let _ = stream.write_all(head.as_bytes()).and_then(|_| stream.write_all(&out));
     }
