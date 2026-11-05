@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { parseDbTimestamp } from "../lib/dates";
 import { getDashboardData, getPaymentGuidance } from "../lib/backend";
 import type { DashboardData, PageKey, PaymentGuidanceItem, PaymentGuidanceView } from "../lib/types";
 import { formatMoney } from "../lib/money";
@@ -118,6 +119,6 @@ function DashboardStat({tone,icon,label,value,detail}:{tone:string;icon:string;l
 function CashBar({label,value,max,tone}:{label:string;value:number;max:number;tone:string}){const magnitude=Math.abs(value);return <div className="cashflow-bar-item"><div className="cashflow-track"><i className={tone} style={{height:`${Math.max(4,(magnitude/max)*100)}%`}}/></div><strong>{formatMoney(value)}</strong><span>{label}</span></div>}
 function formatDate(v:string){return new Date(`${v}T12:00:00`).toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric"})}
 function formatShortDate(v:string){return new Date(`${v}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric"})}
-function formatTimestamp(v:string){const normalized=v.includes("T")?v:v.replace(" ","T");const d=new Date(normalized);return Number.isNaN(d.getTime())?v:d.toLocaleDateString("en-US",{month:"short",day:"numeric"})}
+function formatTimestamp(v:string){const d=parseDbTimestamp(v);return Number.isNaN(d.getTime())?v:d.toLocaleDateString("en-US",{month:"short",day:"numeric"})}
 function friendlyEvent(v:string){return v.replaceAll("_"," ").replace(/\b\w/g,c=>c.toUpperCase())}
 function greeting(){const h=new Date().getHours();return h<12?"morning":h<18?"afternoon":"evening"}

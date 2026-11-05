@@ -482,9 +482,10 @@ pub fn mark_bill_paid(payload: MarkPaidPayload, state: State<'_, AppState>) -> A
     )?;
     tx.execute("UPDATE accounts SET book_balance_cents=book_balance_cents-?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![account_id,payload.amount_cents])?;
     tx.execute(
-        "INSERT INTO transactions(id,account_id,transaction_date,description,amount_cents,transaction_type,status,source,created_by_user_id,note,source_entity_type,source_entity_id)
-         VALUES(?1,?2,?3,?4,?5,'bill_payment','cleared','bill_payment',?6,?7,'payment',?8)",
-        params![Uuid::new_v4().to_string(),account_id,payload.paid_date,name,-payload.amount_cents,payload.paid_by_user_id,payload.note,payment_id],
+        "INSERT INTO transactions(id,account_id,transaction_date,description,amount_cents,transaction_type,status,source,created_by_user_id,note,source_entity_type,source_entity_id,category_id)
+         VALUES(?1,?2,?3,?4,?5,'bill_payment','cleared','bill_payment',?6,?7,'payment',?8,
+                (SELECT COALESCE(o.category_id,t.category_id) FROM bill_occurrences o LEFT JOIN bill_templates t ON t.id=o.bill_template_id WHERE o.id=?9))",
+        params![Uuid::new_v4().to_string(),account_id,payload.paid_date,name,-payload.amount_cents,payload.paid_by_user_id,payload.note,payment_id,payload.occurrence_id],
     )?;
     let new_total = already_paid + payload.amount_cents;
     let fully_paid = !payload.is_partial || new_total >= target;
@@ -1048,9 +1049,8 @@ fn persist_schedule(conn: &mut Connection, input: &ScheduleInput, result: &Sched
     let tx = conn.transaction()?;
     for bill in &input.bills {
         tx.execute("DELETE FROM bill_allocations WHERE bill_occurrence_id=?1 AND is_locked=0",[bill.id.as_str()])?;
-        tx.execute("UPDATE bill_occurrences SET status=CASE WHEN status='partial' THEN 'partial' ELSE 'upcoming' END,scheduled_payment_date=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status!='paid'",[bill.id.as_str()])?;
+        tx.execute("UPDATE bill_occurrences SET status=CASE WHEN EXISTS(SELECT 1 FROM payments p WHERE p.bill_occurrence_id=bill_occurrences.id) THEN 'partial' ELSE 'upcoming' END,scheduled_payment_date=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status!='paid'",[bill.id.as_str()])?;
     }
-    let unresolved: std::collections::HashSet<&str> = result.unresolved_bill_ids.iter().map(String::as_str).collect();
     for allocation in &result.allocations {
         // A locked allocation survives the DELETE above, so re-inserting the
         // scheduler's own row for the same occurrence would leave two rows and
@@ -1067,18 +1067,26 @@ fn persist_schedule(conn: &mut Connection, input: &ScheduleInput, result: &Sched
             params![Uuid::new_v4().to_string(),allocation.bill_id,allocation.paycheck_id,funding_source_string(allocation.funding_source_type),allocation.amount.value(),reason_code_string(allocation.reason_code),date_string(allocation.payment_date)],
         )?;
         tx.execute(
-            "UPDATE bill_occurrences SET status=CASE WHEN status='partial' THEN 'partial' ELSE 'scheduled' END,
+            "UPDATE bill_occurrences SET status=CASE WHEN EXISTS(SELECT 1 FROM payments p WHERE p.bill_occurrence_id=bill_occurrences.id) THEN 'partial' ELSE 'scheduled' END,
              scheduled_payment_date=CASE WHEN scheduled_payment_date IS NULL OR scheduled_payment_date>?2 THEN ?2 ELSE scheduled_payment_date END,
              updated_at=CURRENT_TIMESTAMP WHERE id=?1",
             params![allocation.bill_id,date_string(allocation.payment_date)],
         )?;
     }
-    for bill_id in unresolved {
-        let has_alloc: i64 = tx.query_row("SELECT COUNT(*) FROM bill_allocations WHERE bill_occurrence_id=?1",[bill_id],|r|r.get(0))?;
-        if has_alloc>0 { tx.execute("UPDATE bill_occurrences SET status='partial',updated_at=CURRENT_TIMESTAMP WHERE id=?1 AND status!='paid'",[bill_id])?; }
-    }
     tx.commit()?;
     Ok(())
+}
+
+/// Sort key for planner warning codes, most severe first.
+pub(crate) fn warning_severity(code: &str) -> u8 {
+    match code {
+        "ProjectedNegativeBalance" => 0,
+        "BillPastDue" => 1,
+        "FundingShortage" | "PartialFunding" | "NoEligibleFundingSource" => 2,
+        "ProjectedBelowBuffer" => 3,
+        "OptionalCommitmentReduced" => 9,
+        _ => 5,
+    }
 }
 
 pub(crate) fn run_scheduler_internal(state: &AppState) -> AppResult<PlannerViewDto> {
@@ -1189,13 +1197,19 @@ pub struct ArchiveBillPayload { pub id:String }
 #[tauri::command]
 pub fn archive_bill(payload:ArchiveBillPayload,state:State<'_,AppState>)->AppResult<()> {
     let mut conn=state.db.lock().map_err(|_|AppError::Validation("database lock poisoned".into()))?;
-    let tx=conn.transaction()?;
-    tx.execute("DELETE FROM bill_allocations WHERE bill_occurrence_id IN (SELECT id FROM bill_occurrences WHERE bill_template_id=?1 AND status IN ('upcoming','scheduled','partial','late'))",[payload.id.as_str()])?;
-    tx.execute("DELETE FROM bill_occurrences WHERE bill_template_id=?1 AND status IN ('upcoming','scheduled','late')",[payload.id.as_str()])?;
-    tx.execute("UPDATE bill_templates SET is_active=0,archived_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?1",[payload.id.as_str()])?;
-    tx.commit()?;
+    archive_template(&mut conn,&payload.id)?;
     drop(conn);
     let _=run_scheduler_internal(&state)?;
+    Ok(())
+}
+
+/// Deactivates the template, then drops its unpaid occurrences from the plan
+/// (partially paid ones keep their history as 'skipped').
+fn archive_template(conn:&mut Connection,id:&str)->AppResult<()> {
+    let tx=conn.transaction()?;
+    tx.execute("UPDATE bill_templates SET is_active=0,archived_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP WHERE id=?1",[id])?;
+    tx.execute_batch(crate::db::ARCHIVED_BILL_CLEANUP_SQL)?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1273,5 +1287,38 @@ mod tests {
             ).unwrap();
         }
         assert_eq!(estimate_for_template(&conn, "water", 10_000, 6).unwrap(), 10_000);
+    }
+
+    #[test]
+    fn dashboard_alerts_rank_negative_balance_before_routine_notices() {
+        let mut codes = vec!["OptionalCommitmentReduced", "PartialFunding", "ProjectedBelowBuffer", "ProjectedNegativeBalance"];
+        codes.sort_by_key(|c| warning_severity(c));
+        assert_eq!(codes, vec!["ProjectedNegativeBalance", "PartialFunding", "ProjectedBelowBuffer", "OptionalCommitmentReduced"]);
+    }
+
+    #[test]
+    fn underfunded_bill_is_not_marked_partial_and_archive_removes_it() {
+        let mut conn = test_conn();
+        conn.execute(
+            "INSERT INTO bill_templates(id,name,category_id,amount_type,fixed_amount_cents,recurrence_type,payment_type,priority,can_split,is_active,due_day,pay_earliest_days_before) VALUES('big','Big','other','fixed',500000,'one_time','manual','essential',0,1,NULL,31)",
+            [],
+        ).unwrap();
+        let due = date_string(today() + Duration::days(3));
+        conn.execute(
+            "INSERT INTO bill_occurrences(id,bill_template_id,name_snapshot,due_date,latest_payment_date,earliest_payment_date,estimated_amount_cents,status,payment_type_snapshot,priority_snapshot,is_one_time) VALUES('big-1','big','Big',?1,?1,?2,500000,'upcoming','manual','essential',1)",
+            params![due, date_string(today())],
+        ).unwrap();
+        // $1,500 cash minus the $500 buffer can only fund $1,000 of $5,000.
+        let input = build_schedule_input(&conn).unwrap();
+        let result = scheduler::build_plan(&input);
+        assert_eq!(result.unresolved_bill_ids, vec!["big-1".to_string()]);
+        persist_schedule(&mut conn, &input, &result).unwrap();
+        let status: String = conn.query_row("SELECT status FROM bill_occurrences WHERE id='big-1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(status, "scheduled", "partial is reserved for partially paid bills");
+
+        archive_template(&mut conn, "big").unwrap();
+        let left: i64 = conn.query_row("SELECT COUNT(*) FROM bill_occurrences WHERE id='big-1'", [], |r| r.get(0)).unwrap();
+        let allocs: i64 = conn.query_row("SELECT COUNT(*) FROM bill_allocations", [], |r| r.get(0)).unwrap();
+        assert_eq!((left, allocs), (0, 0));
     }
 }

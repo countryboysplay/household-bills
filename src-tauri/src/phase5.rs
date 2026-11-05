@@ -373,7 +373,9 @@ pub fn record_debt_payment(payload:MoneyActionPayload,state:State<'_,AppState>)-
     parse_date(&payload.date,"payment date")?; if payload.amount_cents<=0{return Err(AppError::Validation("payment must be greater than zero".into()));}
     let mut conn=state.db.lock().map_err(|_|AppError::Validation("database lock poisoned".into()))?;let tx=conn.transaction()?;let account=primary_account_id(&tx)?;
     let (name,balance):(String,i64)=tx.query_row("SELECT name,balance_cents FROM debts WHERE id=?1 AND is_active=1",[payload.id.as_str()],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or_else(||AppError::Validation("debt was not found".into()))?;
-    let actual=payload.amount_cents.min(balance.max(0)); if actual<=0{return Err(AppError::Validation("this debt is already paid off".into()));}
+    if balance<=0{return Err(AppError::Validation("this debt is already paid off".into()));}
+    if payload.amount_cents>balance{return Err(AppError::Validation(format!("payment is more than the remaining {} balance of ${:.2}",name,balance as f64/100.0)));}
+    let actual=payload.amount_cents;
     let pid=Uuid::new_v4().to_string();tx.execute("INSERT INTO debt_payments(id,debt_id,account_id,amount_cents,payment_date,paid_by_user_id,is_extra,note) VALUES(?1,?2,?3,?4,?5,?6,1,?7)",params![pid,payload.id,account,actual,payload.date,payload.user_id,payload.note])?;
     tx.execute("UPDATE debts SET balance_cents=MAX(balance_cents-?2,0),updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![payload.id,actual])?;
     tx.execute("UPDATE accounts SET book_balance_cents=book_balance_cents-?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1",params![account,actual])?;

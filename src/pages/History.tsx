@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { parseDbTimestamp } from "../lib/dates";
 import { getHistoryData } from "../lib/backend";
 import type { HistoryData } from "../lib/types";
 import { formatMoney } from "../lib/money";
@@ -16,4 +17,4 @@ function ReconcileTable({items}:{items:HistoryData["reconciliations"]}){return <
 function icon(v:string){if(v.includes("payment"))return"✓";if(v.includes("paycheck"))return"＄";if(v.includes("reconcil"))return"↻";if(v.includes("bill"))return"▣";return"•"}
 function friendly(v:string){return v.replaceAll("_"," ").replace(/\b\w/g,c=>c.toUpperCase())}
 function formatDate(v:string){return new Date(`${v}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}
-function formatDateTime(v:string){const d=new Date(v.includes("T")?v:v.replace(" ","T"));return Number.isNaN(d.getTime())?v:d.toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"})}
+function formatDateTime(v:string){const d=parseDbTimestamp(v);return Number.isNaN(d.getTime())?v:d.toLocaleString("en-US",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"})}

@@ -50,6 +50,7 @@ export interface DashboardSummary {
   nextPaycheckDate: string | null;
   nextPaycheckOwner: string | null;
   nextPaycheckAmountCents: number | null;
+  planWarningCount: number;
 }
 
 export interface OnboardingPayload {
