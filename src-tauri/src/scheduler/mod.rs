@@ -647,17 +647,34 @@ fn allocate_optional_commitments(
     adjustments
 }
 
-fn bucket_summaries(input: &ScheduleInput, buckets: &[FundingBucket]) -> Vec<FundingBucketSummary> {
+/// Status follows the projected account balance, not how full a paycheck is:
+/// a fully reserved check is still healthy when the account stays well above
+/// the buffer. Shortage = the check is over-committed or the balance dips under
+/// the buffer before the next payday; Tight = it dips within `tight_headroom`.
+fn bucket_summaries(
+    input: &ScheduleInput,
+    buckets: &[FundingBucket],
+    projection: &[ProjectionEvent],
+) -> Vec<FundingBucketSummary> {
+    let end_of_day: BTreeMap<NaiveDate, Money> = projection.iter().map(|e| (e.date, e.balance_after)).collect();
+    let mut paydays: Vec<NaiveDate> = buckets.iter().map(|b| b.date).collect();
+    paydays.sort();
+    paydays.dedup();
     buckets
         .iter()
         .map(|bucket| {
             let remaining = bucket.remaining();
-            let status = if remaining.is_negative() {
-                BucketStatus::Shortage
-            } else if remaining < input.tight_headroom.max(Money::ZERO) {
-                BucketStatus::Tight
-            } else {
-                BucketStatus::Healthy
+            let next_payday = paydays.iter().copied().find(|d| *d > bucket.date);
+            let interval_min = end_of_day
+                .range(bucket.date..)
+                .take_while(|(d, _)| next_payday.map_or(true, |n| **d < n))
+                .map(|(_, b)| *b)
+                .min();
+            let status = match interval_min {
+                _ if remaining.is_negative() => BucketStatus::Shortage,
+                Some(low) if low < input.protected_buffer => BucketStatus::Shortage,
+                Some(low) if low < input.protected_buffer + input.tight_headroom.max(Money::ZERO) => BucketStatus::Tight,
+                _ => BucketStatus::Healthy,
             };
             FundingBucketSummary {
                 bucket_id: bucket.id.clone(),
@@ -795,35 +812,38 @@ fn build_projection(
         end_of_day_balances.insert(event.date, balance);
     }
 
-    for (date, end_balance) in end_of_day_balances {
-        if end_balance < input.protected_buffer {
-            let shortfall = input.protected_buffer - end_balance;
-            warnings.push(ScheduleWarning {
-                code: WarningCode::ProjectedBelowBuffer,
-                entity_id: None,
-                date: Some(date),
-                amount: Some(shortfall),
-                message: format!(
-                    "Projected end-of-day balance is {} below the protected buffer on {}.",
-                    format_money(shortfall),
-                    date
-                ),
-            });
+    // One warning per stretch of consecutive projected days under a threshold,
+    // reporting the worst shortfall, instead of one warning for every day.
+    let thresholds = [
+        (WarningCode::ProjectedBelowBuffer, input.protected_buffer, "the protected buffer"),
+        (WarningCode::ProjectedNegativeBalance, Money::ZERO, "$0.00"),
+    ];
+    for (code, floor, floor_label) in thresholds {
+        let mut run: Option<(NaiveDate, NaiveDate, Money)> = None;
+        let flush = |run: &mut Option<(NaiveDate, NaiveDate, Money)>, warnings: &mut Vec<ScheduleWarning>| {
+            if let Some((start, end, worst)) = run.take() {
+                let span = if start == end { format!("on {start}") } else { format!("from {start} through {end}") };
+                warnings.push(ScheduleWarning {
+                    code,
+                    entity_id: None,
+                    date: Some(start),
+                    amount: Some(worst),
+                    message: format!("Projected balance is below {floor_label} {span}, by as much as {}.", format_money(worst)),
+                });
+            }
+        };
+        for (&date, &end_balance) in &end_of_day_balances {
+            if end_balance < floor {
+                let shortfall = floor - end_balance;
+                run = Some(match run {
+                    Some((start, _, worst)) => (start, date, worst.max(shortfall)),
+                    None => (date, date, shortfall),
+                });
+            } else {
+                flush(&mut run, warnings);
+            }
         }
-        if end_balance.is_negative() {
-            let shortfall = end_balance.abs();
-            warnings.push(ScheduleWarning {
-                code: WarningCode::ProjectedNegativeBalance,
-                entity_id: None,
-                date: Some(date),
-                amount: Some(shortfall),
-                message: format!(
-                    "Projected end-of-day balance is {} below $0.00 on {}.",
-                    format_money(shortfall),
-                    date
-                ),
-            });
-        }
+        flush(&mut run, warnings);
     }
 
     projection
@@ -835,13 +855,13 @@ pub fn build_plan(input: &ScheduleInput) -> ScheduleResult {
     let (allocations, unresolved_bill_ids) = allocate_bills(input, &mut buckets, &mut warnings);
     let commitment_adjustments =
         allocate_optional_commitments(input, &mut buckets, &mut warnings);
-    let bucket_summaries = bucket_summaries(input, &buckets);
     let projection = build_projection(
         input,
         &allocations,
         &commitment_adjustments,
         &mut warnings,
     );
+    let bucket_summaries = bucket_summaries(input, &buckets, &projection);
 
     ScheduleResult {
         allocations,
@@ -1050,6 +1070,52 @@ mod tests {
         assert_eq!(bucket(&result, CURRENT_CASH_BUCKET_ID).allocatable_capacity, Money::cents(50_000));
         assert_eq!(bucket(&result, "p1").allocatable_capacity, Money::cents(100_000));
         assert_eq!(bucket(&result, "p2").allocatable_capacity, Money::cents(100_000));
+    }
+
+    #[test]
+    fn fully_reserved_paycheck_is_healthy_when_the_account_has_room() {
+        // $3,000 cash covers everything; the $1,000 check is fully reserved for a
+        // $1,000 bill due before the next check, but the balance never nears the buffer.
+        let result = build_plan(&input(
+            300_000,
+            50_000,
+            vec![p("p1", "2026-08-14", 100_000), p("p2", "2026-08-28", 100_000)],
+            vec![bill("rent", "2026-08-20", 100_000, PaymentType::Manual)],
+        ));
+        assert_eq!(bucket(&result, "p1").remaining_headroom, Money::ZERO);
+        assert_eq!(bucket(&result, "p1").status, BucketStatus::Healthy);
+    }
+
+    #[test]
+    fn paycheck_is_tight_when_balance_dips_near_the_buffer() {
+        // $0 cash, $500 buffer: after the $1,000 check and a $450 bill the balance
+        // is $550 -> $50 above the buffer, inside the $100 tight headroom.
+        let result = build_plan(&input(
+            0,
+            50_000,
+            vec![p("p1", "2026-08-14", 100_000), p("p2", "2026-08-28", 100_000)],
+            vec![bill("power", "2026-08-20", 45_000, PaymentType::Autopay)],
+        ));
+        assert_eq!(bucket(&result, "p1").status, BucketStatus::Tight);
+    }
+
+    #[test]
+    fn consecutive_low_balance_days_produce_one_warning_with_the_worst_amount() {
+        let result = build_plan(&input(
+            0,
+            50_000,
+            vec![p("p1", "2026-08-14", 100_000)],
+            vec![
+                bill("a", "2026-08-15", 80_000, PaymentType::Autopay),
+                bill("b", "2026-08-16", 10_000, PaymentType::Autopay),
+            ],
+        ));
+        let below: Vec<_> = result.warnings.iter().filter(|w| w.code == WarningCode::ProjectedBelowBuffer).collect();
+        // Aug 1 ($0) is one stretch; the Aug 14 check lifts the balance to $1,000,
+        // then Aug 15 ($200) and Aug 16 (-$100) form a second stretch, worst $400 short.
+        assert_eq!(below.len(), 2, "{below:?}");
+        assert_eq!(below[1].amount, Some(Money::cents(40_000)));
+        assert!(below[1].message.contains("from 2026-08-15 through 2026-08-16"), "{}", below[1].message);
     }
 
     #[test]

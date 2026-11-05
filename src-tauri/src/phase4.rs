@@ -275,17 +275,30 @@ pub fn get_dashboard_data(state: State<'_, AppState>) -> AppResult<DashboardData
             tone: "orange".into(),
         });
     }
-    for w in planner.warnings.iter().take(3) {
+    // Most severe first (the planner lists warnings by date), so a projected
+    // negative balance is never pushed off the card by routine notices.
+    let mut warnings: Vec<_> = planner.warnings.iter().collect();
+    warnings.sort_by_key(|w| crate::phase3::warning_severity(&w.code));
+    // One alert per kind (its earliest date); the rest are summarized below.
+    let mut seen = std::collections::HashSet::new();
+    let shown: Vec<_> = warnings.iter().filter(|w| seen.insert(w.code.as_str())).take(3).collect();
+    for w in &shown {
+        let (title, tone) = match w.code.as_str() {
+            "ProjectedNegativeBalance" => ("Projected negative balance", "red"),
+            "BillPastDue" => ("Bill past due", "red"),
+            "FundingShortage" | "PartialFunding" | "NoEligibleFundingSource" => ("Funding shortage", "red"),
+            "ProjectedBelowBuffer" => ("Projected buffer warning", "orange"),
+            "OptionalCommitmentReduced" => ("Optional amount reduced", "blue"),
+            _ => ("Plan needs attention", "orange"),
+        };
+        alerts.push(DashboardAlertDto { code: w.code.clone(), title: title.into(), message: w.message.clone(), tone: tone.into() });
+    }
+    if warnings.len() > shown.len() {
         alerts.push(DashboardAlertDto {
-            code: w.code.clone(),
-            title: match w.code.as_str() {
-                "negative_balance" => "Projected negative balance".into(),
-                "below_buffer" => "Projected buffer warning".into(),
-                "funding_shortage" => "Funding shortage".into(),
-                _ => "Plan needs attention".into(),
-            },
-            message: w.message.clone(),
-            tone: if w.code == "negative_balance" || w.code == "funding_shortage" { "red".into() } else { "orange".into() },
+            code: "more_warnings".into(),
+            title: format!("{} more plan notices", warnings.len() - shown.len()),
+            message: "Open the Paycheck Planner to review every warning.".into(),
+            tone: "blue".into(),
         });
     }
     if alerts.is_empty() {

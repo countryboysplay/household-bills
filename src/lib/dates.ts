@@ -21,3 +21,13 @@ export const todayText = (): string => dateText(new Date());
  * value onto an adjacent day.
  */
 export const parseDateText = (value: string): Date => new Date(`${value}T12:00:00`);
+
+/**
+ * Parse a SQLite `CURRENT_TIMESTAMP` value (`YYYY-MM-DD HH:MM:SS`, always UTC)
+ * into a `Date`. Without the `Z`, browsers read it as local time and every
+ * activity timestamp shifts by the UTC offset.
+ */
+export const parseDbTimestamp = (value: string): Date => {
+  const iso = value.includes("T") ? value : value.replace(" ", "T");
+  return new Date(/[Zz]|[+-]\d\d:?\d\d$/.test(iso) || iso.length <= 10 ? iso : `${iso}Z`);
+};

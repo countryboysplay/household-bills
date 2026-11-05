@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { parseDbTimestamp } from "../lib/dates";
 import { addTransaction, getSpendingView, reconcileAccount } from "../lib/backend";
 import type { SpendingView, UserProfile } from "../lib/types";
 import { dollarsToCents, formatMoney } from "../lib/money";
@@ -71,5 +72,5 @@ function ReconcileModal({data,users,accountId,onClose,onSaved}:{data:SpendingVie
 
 function friendly(v:string){return v.replaceAll("_"," ").replace(/\b\w/g,c=>c.toUpperCase())}
 function formatShortDate(v:string){return new Date(`${v}T12:00:00`).toLocaleDateString("en-US",{month:"short",day:"numeric"})}
-function formatDateTime(v:string){const d=new Date(v.includes("T")?v:v.replace(" ","T"));return Number.isNaN(d.getTime())?v:d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}
+function formatDateTime(v:string){const d=parseDbTimestamp(v);return Number.isNaN(d.getTime())?v:d.toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}
 function todayText(){const d=new Date();return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`}

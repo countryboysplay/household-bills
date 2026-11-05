@@ -53,6 +53,7 @@ const browserDashboard: DashboardSummary = {
   nextPaycheckDate: "2026-08-14",
   nextPaycheckOwner: "Jonathan",
   nextPaycheckAmountCents: 268012,
+  planWarningCount: 0,
 };
 
 export async function getBootstrap(): Promise<AppBootstrap> {

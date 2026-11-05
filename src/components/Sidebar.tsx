@@ -12,7 +12,7 @@ const nav: { key: PageKey; label: string; icon: string }[] = [
   { key: "reports", label: "Reports", icon: "reports" },
 ];
 
-export function Sidebar({ page, onPage, profileName, version }: { page: PageKey; onPage: (p: PageKey) => void; profileName: string; version: string }) {
+export function Sidebar({ page, onPage, profileName, version, planWarningCount }: { page: PageKey; onPage: (p: PageKey) => void; profileName: string; version: string; planWarningCount: number }) {
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -32,7 +32,7 @@ export function Sidebar({ page, onPage, profileName, version }: { page: PageKey;
       </nav>
       <div className="sidebar-spacer"/>
       <div className="system-status">
-        <div><i className="status-dot"/>All systems normal</div>
+        {planWarningCount ? <div className="status-attention" role="button" tabIndex={0} onClick={() => onPage("planner")} onKeyDown={e => { if (e.key === "Enter") onPage("planner"); }}><i className="status-dot warn"/>Plan needs attention ({planWarningCount})</div> : <div><i className="status-dot"/>All systems normal</div>}
         <p>Database: <span>Local (SQLite)</span></p>
         <p>Backups: <span>Enabled</span></p>
         <p>Storage: <span>Local Only</span></p>

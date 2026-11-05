@@ -3,6 +3,8 @@ use uuid::Uuid;
 
 use crate::{domain::money::Money, error::AppResult};
 
+pub const ARCHIVED_BILL_CLEANUP_SQL: &str = include_str!("../../migrations/007_archived_bill_cleanup.sql");
+
 const MIGRATIONS: &[(&str, &str)] = &[
     ("001_initial", include_str!("../../migrations/001_initial.sql")),
     ("002_phase3", include_str!("../../migrations/002_phase3.sql")),
@@ -10,6 +12,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("004_due_date_semantics", include_str!("../../migrations/004_due_date_semantics.sql")),
     ("005_phase5", include_str!("../../migrations/005_phase5.sql")),
     ("006_release_1_0", include_str!("../../migrations/006_release_1_0.sql")),
+    ("007_archived_bill_cleanup", ARCHIVED_BILL_CLEANUP_SQL),
 ];
 
 pub fn has_pending_migrations(conn: &Connection) -> AppResult<bool> {

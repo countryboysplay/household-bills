@@ -64,7 +64,7 @@ export default function App() {
     }
   };
 
-  return <div className="app-shell"><Sidebar page={page} onPage={setPage} profileName={profile} version={bootstrap.appVersion}/><div className="content-shell">
+  return <div className="app-shell"><Sidebar page={page} onPage={setPage} profileName={profile} version={bootstrap.appVersion} planWarningCount={summary?.planWarningCount ?? 0}/><div className="content-shell">
     {bootstrap.restoreError && <div className="page-error"><strong>Backup restore did not complete.</strong> {bootstrap.restoreError} Your existing data was left unchanged.</div>}
     {updateStatus?.available &&<div className="update-banner"><div><strong>Household Bills {updateStatus.version} is available</strong><span>Your financial data will be backed up before the signed update installs.</span></div><button className="primary" onClick={()=>void applyUpdate()} disabled={installingUpdate}>{installingUpdate ? "Installing…" : "Install Update"}</button><button className="update-dismiss" aria-label="Dismiss update notice" onClick={()=>setUpdateStatus(null)}>×</button></div>}
     {page === "dashboard" ? <Dashboard profileName={profile} onNavigate={setPage}/> :

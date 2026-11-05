@@ -26,7 +26,7 @@ pub struct OnboardingPayload { pub household_name: String, pub protected_buffer_
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DashboardSummaryDto { pub current_cash_cents: i64, pub safe_to_spend_cents: i64, pub reserved_bills_cents: i64, pub protected_buffer_cents: i64, pub upcoming_bill_count: i64, pub next_paycheck_date: Option<String>, pub next_paycheck_owner: Option<String>, pub next_paycheck_amount_cents: Option<i64> }
+pub struct DashboardSummaryDto { pub current_cash_cents: i64, pub safe_to_spend_cents: i64, pub reserved_bills_cents: i64, pub protected_buffer_cents: i64, pub upcoming_bill_count: i64, pub next_paycheck_date: Option<String>, pub next_paycheck_owner: Option<String>, pub next_paycheck_amount_cents: Option<i64>, pub plan_warning_count: usize }
 
 fn bootstrap_from_state(state: &AppState) -> AppResult<BootstrapDto> {
     let conn = state.db.lock().map_err(|_| AppError::Validation("database lock poisoned".into()))?;
@@ -55,6 +55,8 @@ pub fn complete_onboarding(payload: OnboardingPayload, state: State<'_, AppState
 
 #[tauri::command]
 pub fn get_dashboard_summary(state: State<'_, AppState>) -> AppResult<DashboardSummaryDto> {
+    // Notices that need the household's attention (reduced optional savings do not).
+    let plan_warning_count = crate::phase3::run_scheduler_internal(&state)?.warnings.iter().filter(|w| w.code != "OptionalCommitmentReduced").count();
     let conn = state.db.lock().map_err(|_| AppError::Validation("database lock poisoned".into()))?;
     let current_cash: i64 = conn.query_row("SELECT COALESCE(SUM(book_balance_cents),0) FROM accounts WHERE is_active=1 AND account_type != 'credit'", [], |r| r.get(0))?;
     let buffer: i64 = conn.query_row("SELECT COALESCE(protected_buffer_cents,0) FROM household_settings WHERE id=1", [], |r| r.get(0)).optional()?.unwrap_or(0);
@@ -66,7 +68,7 @@ pub fn get_dashboard_summary(state: State<'_, AppState>) -> AppResult<DashboardS
     let upcoming_bill_count: i64 = conn.query_row("SELECT COUNT(*) FROM bill_occurrences WHERE status IN ('upcoming','scheduled','partial')", [], |r| r.get(0))?;
     let next = conn.query_row("SELECT p.pay_date, u.display_name, COALESCE(p.actual_amount_cents,p.expected_amount_cents,p.projected_amount_cents) FROM paycheck_occurrences p JOIN income_sources i ON i.id=p.income_source_id JOIN users u ON u.id=i.user_id WHERE p.status IN ('projected','updated') AND p.pay_date >= date('now','localtime') ORDER BY p.pay_date LIMIT 1", [], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?))).optional()?;
     let (next_paycheck_date,next_paycheck_owner,next_paycheck_amount_cents) = match next { Some((d,o,a)) => (Some(d),Some(o),Some(a)), None => (None,None,None) };
-    Ok(DashboardSummaryDto { current_cash_cents:current_cash, safe_to_spend_cents:safe, reserved_bills_cents:reserved, protected_buffer_cents:buffer, upcoming_bill_count, next_paycheck_date, next_paycheck_owner, next_paycheck_amount_cents })
+    Ok(DashboardSummaryDto { current_cash_cents:current_cash, safe_to_spend_cents:safe, reserved_bills_cents:reserved, protected_buffer_cents:buffer, upcoming_bill_count, next_paycheck_date, next_paycheck_owner, next_paycheck_amount_cents, plan_warning_count })
 }
 
 #[tauri::command]
