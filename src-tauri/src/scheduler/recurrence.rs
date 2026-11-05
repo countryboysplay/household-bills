@@ -113,21 +113,49 @@ pub fn generate_monthly_bill_dates(
     payment_window_rule: PaymentWindowRule,
     holidays: &BTreeSet<NaiveDate>,
 ) -> Vec<GeneratedBillDate> {
-    if through_date < planning_date {
-        return Vec::new();
-    }
+    generate_interval_bill_dates(
+        planning_date,
+        through_date,
+        (planning_date.year(), planning_date.month()),
+        1,
+        day_of_month,
+        business_day_rule,
+        payment_window_rule,
+        holidays,
+    )
+}
 
-    let mut year = planning_date.year();
-    let mut month = planning_date.month();
+/// Bill due dates every `interval_months` months (1 monthly, 3 quarterly,
+/// 6 twice a year, 12 yearly), starting at `start` (year, month). The day is
+/// kept separately so a 31st clamps per month instead of drifting to the 28th.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_interval_bill_dates(
+    planning_date: NaiveDate,
+    through_date: NaiveDate,
+    start: (i32, u32),
+    interval_months: u32,
+    day_of_month: u32,
+    business_day_rule: BusinessDayRule,
+    payment_window_rule: PaymentWindowRule,
+    holidays: &BTreeSet<NaiveDate>,
+) -> Vec<GeneratedBillDate> {
     let mut result = Vec::new();
-
+    if through_date < planning_date {
+        return result;
+    }
+    let step = i32::try_from(interval_months.max(1)).unwrap_or(1);
+    let mut index = start.0 * 12 + i32::try_from(start.1).unwrap_or(1) - 1;
     loop {
+        let (year, month) = (index.div_euclid(12), u32::try_from(index.rem_euclid(12)).unwrap_or(0) + 1);
         let raw_due = clamped_month_date(year, month, day_of_month);
-        let pay_by_date = adjust_business_day(raw_due, business_day_rule, holidays);
+        if raw_due > through_date {
+            break;
+        }
         // Keep the contractual due date separate from the conservative planning
         // deadline. A bill due Sunday Sep 20 is still due Sep 20; the scheduler
         // may plan to have it funded/paid by Friday Sep 18.
-        if raw_due >= planning_date && raw_due <= through_date {
+        if raw_due >= planning_date {
+            let pay_by_date = adjust_business_day(raw_due, business_day_rule, holidays);
             let (earliest, _) = payment_window(planning_date, pay_by_date, payment_window_rule);
             result.push(GeneratedBillDate {
                 due_date: raw_due,
@@ -135,22 +163,45 @@ pub fn generate_monthly_bill_dates(
                 latest_payment_date: pay_by_date,
             });
         }
+        index += step;
+    }
+    result
+}
 
-        if year > through_date.year()
-            || (year == through_date.year() && month >= through_date.month())
-        {
-            break;
-        }
-
-        if month == 12 {
-            year += 1;
-            month = 1;
-        } else {
-            month += 1;
+/// Federal Reserve bank holidays for `year`, as observed: a Sunday holiday
+/// moves to Monday; a Saturday holiday is not observed (banks open Friday).
+pub fn us_bank_holidays(year: i32) -> Vec<NaiveDate> {
+    let nth = |month: u32, weekday: Weekday, n: u8| {
+        NaiveDate::from_weekday_of_month_opt(year, month, weekday, n).expect("valid nth weekday")
+    };
+    let mut memorial = NaiveDate::from_ymd_opt(year, 5, 31).expect("May 31");
+    while memorial.weekday() != Weekday::Mon {
+        memorial -= Duration::days(1);
+    }
+    let mut days = vec![
+        nth(1, Weekday::Mon, 3),  // Martin Luther King Jr. Day
+        nth(2, Weekday::Mon, 3),  // Washington's Birthday
+        memorial,                 // Memorial Day
+        nth(9, Weekday::Mon, 1),  // Labor Day
+        nth(10, Weekday::Mon, 2), // Columbus Day
+        nth(11, Weekday::Thu, 4), // Thanksgiving
+    ];
+    for (month, day) in [(1, 1), (6, 19), (7, 4), (11, 11), (12, 25)] {
+        let date = NaiveDate::from_ymd_opt(year, month, day).expect("fixed holiday");
+        match date.weekday() {
+            Weekday::Sat => {}
+            Weekday::Sun => days.push(date + Duration::days(1)),
+            _ => days.push(date),
         }
     }
+    days.sort();
+    days
+}
 
-    result
+/// Bank holidays for every year touched by `from..=to`, plus one year either
+/// side so business-day moves can cross a year boundary.
+pub fn bank_holidays_between(from: NaiveDate, to: NaiveDate) -> BTreeSet<NaiveDate> {
+    (from.year() - 1..=to.year() + 1).flat_map(us_bank_holidays).collect()
 }
 
 fn generate_anchored_dates(
@@ -289,6 +340,36 @@ mod tests {
             ),
             d("2026-12-24")
         );
+    }
+
+    #[test]
+    fn us_bank_holidays_follow_federal_reserve_observance() {
+        let h = us_bank_holidays(2027);
+        assert_eq!(h, vec![
+            d("2027-01-01"), d("2027-01-18"), d("2027-02-15"), d("2027-05-31"),
+            d("2027-07-05"), d("2027-09-06"), d("2027-10-11"),
+            d("2027-11-11"), d("2027-11-25"),
+        ]); // Jun 19 and Dec 25 are Saturdays (not observed); Jul 4 is a Sunday (Monday off)
+        // New Year's Day 2022 is a Saturday, so Friday Dec 31, 2021 stays a business day.
+        assert!(!us_bank_holidays(2021).contains(&d("2021-12-31")));
+        assert!(us_bank_holidays(2026).contains(&d("2026-11-26")));
+    }
+
+    #[test]
+    fn new_years_day_paycheck_moves_to_prior_business_day() {
+        let holidays = bank_holidays_between(d("2026-11-05"), d("2027-02-01"));
+        assert_eq!(adjust_business_day(d("2027-01-01"), BusinessDayRule::PriorBusinessDay, &holidays), d("2026-12-31"));
+        assert_eq!(adjust_business_day(d("2027-01-01"), BusinessDayRule::NextBusinessDay, &holidays), d("2027-01-04"));
+    }
+
+    #[test]
+    fn quarterly_and_yearly_bills_step_from_their_first_due_date() {
+        let window = PaymentWindowRule::DaysBeforeDue { earliest_days_before: 31, latest_days_before: 0 };
+        let none = BTreeSet::new();
+        let q = generate_interval_bill_dates(d("2026-11-05"), d("2027-12-31"), (2026, 8), 3, 31, BusinessDayRule::Exact, window, &none);
+        assert_eq!(q.iter().map(|g| g.due_date).collect::<Vec<_>>(), vec![d("2026-11-30"), d("2027-02-28"), d("2027-05-31"), d("2027-08-31"), d("2027-11-30")]);
+        let y = generate_interval_bill_dates(d("2026-11-05"), d("2028-06-01"), (2027, 3), 12, 15, BusinessDayRule::Exact, window, &none);
+        assert_eq!(y.iter().map(|g| g.due_date).collect::<Vec<_>>(), vec![d("2027-03-15"), d("2028-03-15")]);
     }
 
     #[test]

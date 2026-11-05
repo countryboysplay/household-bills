@@ -16,7 +16,8 @@ use crate::{
     scheduler::{
         self,
         recurrence::{
-            generate_monthly_bill_dates, generate_pay_dates, BusinessDayRule, PayScheduleRule, PaymentWindowRule,
+            adjust_business_day, bank_holidays_between, generate_interval_bill_dates, generate_pay_dates, BusinessDayRule,
+            PayScheduleRule, PaymentWindowRule,
         },
         BucketStatus, ScheduleInput, ScheduleResult,
     },
@@ -116,11 +117,27 @@ fn estimate_for_template(conn: &Connection, template_id: &str, fallback: i64, wi
     Ok(scheduler::estimate_variable_bill(&history, Money::cents(fallback.max(0))).value())
 }
 
+/// US bank holidays around the planning window; pay dates and bill deadlines skip them.
+fn bank_holidays() -> BTreeSet<NaiveDate> {
+    bank_holidays_between(today(), today() + Duration::days(800))
+}
+
+/// Months between due dates for a recurring bill, or None for one-time bills.
+pub(crate) fn recurrence_interval_months(recurrence: &str) -> Option<u32> {
+    match recurrence {
+        "monthly" => Some(1),
+        "quarterly" => Some(3),
+        "semiannual" => Some(6),
+        "annual" => Some(12),
+        _ => None,
+    }
+}
+
 fn ensure_template_occurrences(conn: &Connection, template_id: &str, through: NaiveDate) -> AppResult<()> {
     let row = conn
         .query_row(
             "SELECT name,category_id,amount_type,fixed_amount_cents,fallback_estimate_cents,estimate_window_count,
-                    recurrence_type,due_day,payment_type,priority,pay_earliest_days_before
+                    recurrence_type,due_day,payment_type,priority,pay_earliest_days_before,recurrence_config_json
              FROM bill_templates WHERE id=?1 AND is_active=1",
             [template_id],
             |r| {
@@ -136,12 +153,13 @@ fn ensure_template_occurrences(conn: &Connection, template_id: &str, through: Na
                     r.get::<_, String>(8)?,
                     r.get::<_, String>(9)?,
                     r.get::<_, i64>(10)?,
+                    r.get::<_, String>(11)?,
                 ))
             },
         )
         .optional()?;
 
-    let Some((name, category_id, amount_type, fixed, fallback, window, recurrence, due_day, payment_type, priority, earliest_days)) = row else {
+    let Some((name, category_id, amount_type, fixed, fallback, window, recurrence, due_day, payment_type, priority, earliest_days, recurrence_json)) = row else {
         return Ok(());
     };
 
@@ -151,19 +169,30 @@ fn ensure_template_occurrences(conn: &Connection, template_id: &str, through: Na
         fixed.unwrap_or(0)
     };
 
-    if recurrence == "monthly" {
-        let day = u32::try_from(due_day.unwrap_or(1).clamp(1, 31)).unwrap_or(1);
+    if let Some(interval) = recurrence_interval_months(&recurrence) {
         let planning = today();
-        let dates = generate_monthly_bill_dates(
+        let anchor = serde_json::from_str::<serde_json::Value>(&recurrence_json).ok()
+            .and_then(|v| v.get("firstDueDate").and_then(|d| d.as_str()).map(str::to_owned))
+            .and_then(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok());
+        let (start, day) = match anchor {
+            Some(a) if interval > 1 => ((a.year(), a.month()), a.day()),
+            _ => ((planning.year(), planning.month()), u32::try_from(due_day.unwrap_or(1).clamp(1, 31)).unwrap_or(1)),
+        };
+        // Always reach the next occurrence, even when it is past the normal horizon.
+        let through = through.max(planning + Duration::days(i64::from(interval) * 31));
+        let holidays = bank_holidays();
+        let dates = generate_interval_bill_dates(
             planning,
             through,
+            start,
+            interval,
             day,
             BusinessDayRule::PriorBusinessDay,
             PaymentWindowRule::DaysBeforeDue {
                 earliest_days_before: u32::try_from(earliest_days.max(0)).unwrap_or(31),
                 latest_days_before: 0,
             },
-            &BTreeSet::new(),
+            &holidays,
         );
         for generated in dates {
             conn.execute(
@@ -183,6 +212,12 @@ fn ensure_template_occurrences(conn: &Connection, template_id: &str, through: Na
                     payment_type,
                     priority,
                 ],
+            )?;
+            // Rows created before bank holidays were recognised can have a holiday deadline.
+            conn.execute(
+                "UPDATE bill_occurrences SET latest_payment_date=?3, earliest_payment_date=MIN(earliest_payment_date,?3), updated_at=CURRENT_TIMESTAMP
+                  WHERE bill_template_id=?1 AND due_date=?2 AND status IN ('upcoming','scheduled') AND latest_payment_date>?3",
+                params![template_id, date_string(generated.due_date), date_string(generated.latest_payment_date)],
             )?;
         }
 
@@ -232,6 +267,7 @@ pub struct BillListItemDto {
     pub amount_cents: i64,
     pub due_day: Option<i64>,
     pub recurrence_type: String,
+    pub first_due_date: Option<String>,
     pub payment_type: String,
     pub priority: String,
     pub can_split: bool,
@@ -261,6 +297,9 @@ pub struct SaveBillPayload {
     pub due_day: Option<i64>,
     pub recurrence_type: String,
     pub one_time_due_date: Option<String>,
+    /// First due date for quarterly / twice-a-year / yearly bills.
+    #[serde(default)]
+    pub first_due_date: Option<String>,
     pub payment_type: String,
     pub priority: String,
     pub can_split: bool,
@@ -293,7 +332,7 @@ fn list_bills_from_conn(conn: &Connection) -> AppResult<Vec<BillListItemDto>> {
         "SELECT t.id,t.name,t.category_id,COALESCE(c.name,'Other'),t.amount_type,
                 CASE WHEN t.amount_type='fixed' THEN COALESCE(t.fixed_amount_cents,0) ELSE COALESCE(t.fallback_estimate_cents,0) END,
                 t.due_day,t.recurrence_type,t.payment_type,t.priority,t.can_split,t.assigned_user_id,u.display_name,
-                COALESCE(t.pay_earliest_days_before,31)
+                COALESCE(t.pay_earliest_days_before,31),json_extract(t.recurrence_config_json,'$.firstDueDate')
          FROM bill_templates t
          LEFT JOIN categories c ON c.id=t.category_id
          LEFT JOIN users u ON u.id=t.assigned_user_id
@@ -306,13 +345,13 @@ fn list_bills_from_conn(conn: &Connection) -> AppResult<Vec<BillListItemDto>> {
                 r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?, r.get::<_, i64>(5)?, r.get::<_, Option<i64>>(6)?, r.get::<_, String>(7)?,
                 r.get::<_, String>(8)?, r.get::<_, String>(9)?, r.get::<_, i64>(10)? == 1,
-                r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?, r.get::<_, i64>(13)?,
+                r.get::<_, Option<String>>(11)?, r.get::<_, Option<String>>(12)?, r.get::<_, i64>(13)?, r.get::<_, Option<String>>(14)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut out = Vec::new();
-    for (id,name,category_id,category_name,amount_type,base_amount,due_day,recurrence_type,payment_type,priority,can_split,assigned_user_id,assigned_user_name,pay_earliest_days_before) in base {
+    for (id,name,category_id,category_name,amount_type,base_amount,due_day,recurrence_type,payment_type,priority,can_split,assigned_user_id,assigned_user_name,pay_earliest_days_before,first_due_date) in base {
         let next = conn.query_row(
             "SELECT o.id,o.due_date,o.latest_payment_date,o.status,p.pay_date,u.display_name,o.estimated_amount_cents,
                     MAX(COALESCE(o.actual_required_amount_cents,o.manual_amount_override_cents,o.estimated_amount_cents)
@@ -331,7 +370,7 @@ fn list_bills_from_conn(conn: &Connection) -> AppResult<Vec<BillListItemDto>> {
             Some((oid,d,pay_by,s,pd,po,a,rem)) => (Some(oid),Some(d),Some(pay_by),Some(s),pd,po,a,rem),
             None => (None,None,None,None,None,None,base_amount,base_amount),
         };
-        out.push(BillListItemDto { id,name,category_id,category_name,amount_type,amount_cents,due_day,recurrence_type,payment_type,priority,can_split,assigned_user_id,assigned_user_name,next_occurrence_id,next_due_date,next_pay_by_date,next_status,assigned_paycheck_date,assigned_paycheck_owner,pay_earliest_days_before,remaining_amount_cents });
+        out.push(BillListItemDto { id,name,category_id,category_name,amount_type,amount_cents,due_day,recurrence_type,first_due_date,payment_type,priority,can_split,assigned_user_id,assigned_user_name,next_occurrence_id,next_due_date,next_pay_by_date,next_status,assigned_paycheck_date,assigned_paycheck_owner,pay_earliest_days_before,remaining_amount_cents });
     }
     Ok(out)
 }
@@ -349,8 +388,14 @@ pub fn save_bill(payload: SaveBillPayload, state: State<'_, AppState>) -> AppRes
     if !matches!(payload.amount_type.as_str(), "fixed" | "variable") { return Err(AppError::Validation("amount type must be fixed or variable".into())); }
     if !matches!(payload.payment_type.as_str(), "manual" | "autopay") { return Err(AppError::Validation("payment type must be manual or autopay".into())); }
     if !matches!(payload.priority.as_str(), "essential" | "normal" | "flexible") { return Err(AppError::Validation("invalid bill priority".into())); }
-    if !matches!(payload.recurrence_type.as_str(), "monthly" | "one_time") { return Err(AppError::Validation("recurrence must be monthly or one_time".into())); }
+    let interval = recurrence_interval_months(&payload.recurrence_type);
+    if interval.is_none() && payload.recurrence_type != "one_time" { return Err(AppError::Validation("recurrence must be monthly, quarterly, semiannual, annual or one_time".into())); }
     if payload.recurrence_type == "monthly" && !(1..=31).contains(&payload.due_day.unwrap_or(0)) { return Err(AppError::Validation("monthly due day must be between 1 and 31".into())); }
+    let first_due = match interval {
+        Some(i) if i > 1 => Some(parse_date(payload.first_due_date.as_deref().ok_or_else(|| AppError::Validation("first due date is required".into()))?, "first due date")?),
+        _ => None,
+    };
+    let due_day = first_due.map(|d| i64::from(d.day())).or(payload.due_day);
 
     let mut conn = state.db.lock().map_err(|_| AppError::Validation("database lock poisoned".into()))?;
     let tx = conn.transaction()?;
@@ -361,6 +406,8 @@ pub fn save_bill(payload: SaveBillPayload, state: State<'_, AppState>) -> AppRes
         let due = payload.one_time_due_date.as_deref().ok_or_else(|| AppError::Validation("one-time due date is required".into()))?;
         parse_date(due, "one-time due date")?;
         json!({"dueDate": due}).to_string()
+    } else if let Some(first) = first_due {
+        json!({"firstDueDate": date_string(first)}).to_string()
     } else { "{}".to_string() };
     let earliest = payload.pay_earliest_days_before.unwrap_or(31).clamp(0, 365);
 
@@ -369,7 +416,7 @@ pub fn save_bill(payload: SaveBillPayload, state: State<'_, AppState>) -> AppRes
             "UPDATE bill_templates SET name=?2,category_id=?3,amount_type=?4,fixed_amount_cents=?5,fallback_estimate_cents=?6,
                 recurrence_type=?7,recurrence_config_json=?8,payment_type=?9,priority=?10,can_split=?11,assigned_user_id=?12,
                 due_day=?13,pay_earliest_days_before=?14,notes=?15,updated_at=CURRENT_TIMESTAMP WHERE id=?1",
-            params![id,payload.name.trim(),payload.category_id,payload.amount_type,fixed,fallback,payload.recurrence_type,recurrence_json,payload.payment_type,payload.priority,if payload.can_split {1}else{0},payload.assigned_user_id,payload.due_day,earliest,payload.notes],
+            params![id,payload.name.trim(),payload.category_id,payload.amount_type,fixed,fallback,payload.recurrence_type,recurrence_json,payload.payment_type,payload.priority,if payload.can_split {1}else{0},payload.assigned_user_id,due_day,earliest,payload.notes],
         )?;
         // A one-time bill has exactly one occurrence, and editing it means replacing
         // that occurrence even once its due date has passed — otherwise the edit is
@@ -400,7 +447,7 @@ pub fn save_bill(payload: SaveBillPayload, state: State<'_, AppState>) -> AppRes
                 recurrence_type,recurrence_config_json,due_rule_json,payment_type,priority,payment_window_type,payment_window_config_json,
                 can_split,assigned_user_id,is_active,notes,due_day,pay_earliest_days_before)
              VALUES(?1,?2,?3,?4,?5,?6,6,?7,?8,'{}',?9,?10,'custom','{}',?11,?12,1,?13,?14,?15)",
-            params![id,payload.name.trim(),payload.category_id,payload.amount_type,fixed,fallback,payload.recurrence_type,recurrence_json,payload.payment_type,payload.priority,if payload.can_split {1}else{0},payload.assigned_user_id,payload.notes,payload.due_day,earliest],
+            params![id,payload.name.trim(),payload.category_id,payload.amount_type,fixed,fallback,payload.recurrence_type,recurrence_json,payload.payment_type,payload.priority,if payload.can_split {1}else{0},payload.assigned_user_id,payload.notes,due_day,earliest],
         )?;
     }
 
@@ -631,13 +678,29 @@ fn ensure_income_source_occurrences(conn: &Connection, source_id: &str, through:
     if active != 1 || schedule_type == "manual" { return Ok(()); }
 
     let rule = pay_schedule_rule(&schedule_type, &config_json)?;
-    let dates = generate_pay_dates(
-        rule,
-        today(),
-        through,
-        business_day_rule_from(&weekend_rule),
-        &BTreeSet::new(),
-    );
+    let holidays = bank_holidays();
+    let day_rule = business_day_rule_from(&weekend_rule);
+    // Checks generated before bank holidays were recognised may sit on a holiday.
+    // Move them (unless the date was set by hand) instead of adding a second check.
+    let stale = {
+        let mut stmt = conn.prepare("SELECT id,pay_date FROM paycheck_occurrences WHERE income_source_id=?1 AND status IN ('projected','updated') AND is_date_override=0 AND pay_date>=date('now','localtime')")?;
+        let rows = stmt.query_map([source_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    for (id, date_text) in stale {
+        let date = parse_date(&date_text, "pay date")?;
+        if !holidays.contains(&date) { continue; }
+        let moved = date_string(adjust_business_day(date, day_rule, &holidays));
+        if moved == date_text { continue; }
+        let taken: Option<String> = conn.query_row(
+            "SELECT p.id FROM paycheck_occurrences p JOIN income_sources i ON i.id=p.income_source_id WHERE i.user_id=?1 AND (p.pay_date=?2 OR p.scheduled_pay_date=?2) LIMIT 1",
+            params![user_id, moved], |r| r.get(0),
+        ).optional()?;
+        if taken.is_none() {
+            conn.execute("UPDATE paycheck_occurrences SET pay_date=?2,scheduled_pay_date=?2,updated_at=CURRENT_TIMESTAMP WHERE id=?1", params![id, moved])?;
+        }
+    }
+    let dates = generate_pay_dates(rule, today(), through, day_rule, &holidays);
     for date in dates {
         let date_text = date_string(date);
         let existing: Option<String> = conn.query_row(

@@ -1,3 +1,6 @@
+/** Monthly, every 3 / 6 / 12 months from a first due date, or once. */
+export type BillRecurrence = "monthly" | "quarterly" | "semiannual" | "annual" | "one_time";
+
 export type PageKey =
   | "dashboard"
   | "planner"
@@ -69,7 +72,8 @@ export interface BillListItem {
   amountType: "fixed" | "variable";
   amountCents: number;
   dueDay: number | null;
-  recurrenceType: "monthly" | "one_time";
+  recurrenceType: BillRecurrence;
+  firstDueDate?: string | null;
   paymentType: "manual" | "autopay";
   priority: "essential" | "normal" | "flexible";
   canSplit: boolean;
@@ -94,8 +98,9 @@ export interface SaveBillPayload {
   amountType: "fixed" | "variable";
   amountCents: number;
   dueDay?: number | null;
-  recurrenceType: "monthly" | "one_time";
+  recurrenceType: BillRecurrence;
   oneTimeDueDate?: string | null;
+  firstDueDate?: string | null;
   paymentType: "manual" | "autopay";
   priority: "essential" | "normal" | "flexible";
   canSplit: boolean;
